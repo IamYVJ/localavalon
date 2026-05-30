@@ -1,0 +1,17 @@
+# Claude Code local tooling & session data (preview config, transcripts, etc.)
+.claude/
+
+# Dependencies (none committed — app is plain static files)
+node_modules/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Logs & local env
+*.log
+.env
+.env.*
