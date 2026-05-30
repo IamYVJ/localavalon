@@ -10,9 +10,10 @@
 // ============================================================================
 
 import { el, clear } from './util.js';
-import { ROLES, ROLE_COUNTS, validateRoleConfig, MIN_PLAYERS, MAX_PLAYERS } from './rules.js';
+import { ROLES, ROLE_COUNTS, validateRoleConfig, OPTIONAL_TOGGLES, MIN_PLAYERS, MAX_PLAYERS } from './rules.js';
 
-const OPTIONAL_TOGGLES = ['percival', 'morgana', 'mordred', 'oberon'];
+// Filler roles that automatically occupy the remaining seats (not toggleable).
+const FILLER_ROLE_IDS = ['servant', 'minion'];
 
 export function render(root, app, intents) {
   clear(root);
@@ -75,23 +76,27 @@ function homeScreen(app, intents) {
 // JOIN
 // ---------------------------------------------------------------------------
 function joinScreen(app, intents) {
+  const nameInput = el('input', {
+    class: 'field', type: 'text', maxlength: '16', placeholder: 'Your name',
+    value: app.me.name || '', 'aria-label': 'Your name',
+    oninput: (e) => intents.setName(e.target.value),
+  });
   const codeInput = el('input', {
     class: 'field field-code', type: 'text', maxlength: '4', placeholder: 'CODE',
     value: app.code || '', autocapitalize: 'characters', autocomplete: 'off',
     'aria-label': 'Room code',
     oninput: (e) => { e.target.value = e.target.value.toUpperCase(); },
   });
-  const nameInput = el('input', {
-    class: 'field', type: 'text', maxlength: '16', placeholder: 'Your name',
-    value: app.me.name || '', 'aria-label': 'Your name',
-    oninput: (e) => intents.setName(e.target.value),
-  });
 
-  return shell(
+  const children = [
     wordmark(),
     el('h1', { class: 'hero hero-sm' }, 'Join a game'),
-    el('p', { class: 'tagline' }, 'Enter the ', el('span', { class: 'accent' }, '4-character code'), ' the host is showing.'),
-    el('div', { class: 'field-group' }, codeInput, nameInput),
+    el('p', { class: 'tagline' }, 'Pick a game on your ', el('span', { class: 'accent' }, 'Wi-Fi'), ' — or enter a code.'),
+    el('div', { class: 'field-group' }, nameInput),
+    el('div', { class: 'section-label' }, 'GAMES ON THIS NETWORK'),
+    discoveryList(app, intents, nameInput),
+    el('div', { class: 'section-label' }, 'OR ENTER A CODE'),
+    el('div', { class: 'field-group' }, codeInput),
     app.error ? el('p', { class: 'error-text', role: 'alert' }, app.error) : null,
     el('div', { class: 'btn-row' },
       el('button', {
@@ -100,6 +105,52 @@ function joinScreen(app, intents) {
       }, '> CONNECT'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '‹ BACK'),
     ),
+  ];
+  return shell(...children);
+}
+
+// The auto-discovered list of open games (or an explanatory fallback).
+function discoveryList(app, intents, nameInput) {
+  const state = app.discoveryState || 'idle';
+  const games = app.discovered || [];
+
+  if (state === 'unsupported') {
+    return el('p', { class: 'fine' },
+      'Automatic discovery isn’t available on the public signaling server — ',
+      'enter the 4-character code the host is showing instead. ',
+      '(Self-host a PeerServer on your LAN to enable the live list.)');
+  }
+
+  if (state === 'searching' && games.length === 0) {
+    return el('div', { class: 'discovery-status' },
+      el('div', { class: 'spinner spinner-sm' }),
+      el('span', { class: 'fine' }, 'Looking for open games…'),
+    );
+  }
+
+  if (games.length === 0) {
+    return el('p', { class: 'fine' },
+      'No open games found yet. Make sure you’re on the same Wi-Fi as the host, or enter a code below.');
+  }
+
+  return el('ul', { class: 'game-list' },
+    ...games.map(g => el('li', {},
+      el('button', {
+        class: 'game-row' + (g.joinable ? '' : ' game-row-busy'),
+        disabled: g.joinable ? false : true,
+        onclick: () => g.joinable && intents.join(g.code, nameInput.value),
+      },
+        el('span', { class: 'game-code' }, g.code),
+        el('span', { class: 'game-meta' },
+          el('span', { class: 'game-host' }, (g.hostName || 'Host') + '’s game'),
+          el('span', { class: 'game-sub' },
+            g.joinable
+              ? `${g.playerCount} ${g.playerCount === 1 ? 'player' : 'players'} in lobby`
+              : 'In progress — can’t join'),
+        ),
+        el('span', { class: 'game-go' }, g.joinable ? '▷' : '🔒'),
+      ),
+    )),
   );
 }
 
@@ -170,6 +221,7 @@ function lobbyScreen(app, intents) {
 
   if (isHost) {
     children.push(roleConfigEditor(app, intents));
+    children.push(gameOptions(app, intents));
     const v = validateRoleConfig(app.pub.config || {}, players.length);
     const canStart = players.length >= MIN_PLAYERS && players.length <= MAX_PLAYERS && v.ok;
     if (!canStart) {
@@ -203,21 +255,37 @@ function roleConfigEditor(app, intents) {
   const v = validateRoleConfig(cfg, count);
 
   const toggles = el('div', { class: 'toggle-list' },
-    ...OPTIONAL_TOGGLES.map(id => {
-      const role = ROLES[id];
-      const on = !!cfg[id];
+    ...OPTIONAL_TOGGLES.map(def => {
+      const on = !!(app.toggles && app.toggles[def.key]);
       return el('label', { class: 'toggle' + (on ? ' on' : '') },
         el('input', {
           type: 'checkbox', ...(on ? { checked: true } : {}),
-          onchange: () => intents.toggleRole(id),
+          onchange: () => intents.toggleRole(def.key),
         }),
         el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, def.label),
+          el('span', { class: 'toggle-blurb' }, def.blurb),
+        ),
+        el('span', { class: 'pill pill-sm ' + (def.team === 'evil' ? 'pill-evil' : 'pill-good') },
+          def.team === 'evil' ? 'EVIL' : 'GOOD'),
+      );
+    }),
+  );
+
+  // Read-only lineup: the filler roles and how many seats they take.
+  const fillers = el('div', { class: 'toggle-list' },
+    ...FILLER_ROLE_IDS.map(id => {
+      const role = ROLES[id];
+      const n = cfg[id] || 0;
+      return el('div', { class: 'filler-row' },
         el('span', { class: 'toggle-text' },
           el('span', { class: 'toggle-name' }, role.name),
           el('span', { class: 'toggle-blurb' }, role.blurb),
         ),
         el('span', { class: 'pill pill-sm ' + (role.team === 'evil' ? 'pill-evil' : 'pill-good') },
           role.team === 'evil' ? 'EVIL' : 'GOOD'),
+        el('span', { class: 'filler-count' }, '×' + n),
       );
     }),
   );
@@ -231,18 +299,41 @@ function roleConfigEditor(app, intents) {
 
   return el('section', { class: 'config' },
     el('div', { class: 'section-label' }, 'OPTIONAL ROLES'),
-    el('p', { class: 'fine' }, 'Merlin & Assassin are always in. The rest fill with Loyal Servants and Minions.'),
+    el('p', { class: 'fine' }, 'Merlin & Assassin are always in.'),
     toggles,
+    el('div', { class: 'section-label' }, 'FILLS REMAINING SEATS'),
+    fillers,
     counts,
+  );
+}
+
+// Host-only game options (non-role settings).
+function gameOptions(app, intents) {
+  const on = !!app.allowReveal;
+  return el('section', { class: 'config' },
+    el('div', { class: 'section-label' }, 'GAME OPTIONS'),
+    el('div', { class: 'toggle-list' },
+      el('label', { class: 'toggle' + (on ? ' on' : '') },
+        el('input', {
+          type: 'checkbox', ...(on ? { checked: true } : {}),
+          onchange: () => intents.toggleReveal(),
+        }),
+        el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, 'Re-check role anytime'),
+          el('span', { class: 'toggle-blurb' }, 'Players can privately peek at their own role throughout the game.'),
+        ),
+      ),
+    ),
   );
 }
 
 // ---------------------------------------------------------------------------
 // ROLE REVEAL — hold-to-reveal card
 // ---------------------------------------------------------------------------
-function roleRevealScreen(app, intents) {
-  const priv = app.priv;
-  const pub = app.pub;
+// Build the hold-to-reveal role card from a private state slice. Shared by the
+// role-reveal phase and the optional mid-game "peek" affordance.
+function buildRoleCard(priv) {
   const role = priv && priv.role;
 
   const front = el('div', { class: 'flip-front' },
@@ -280,7 +371,25 @@ function roleRevealScreen(app, intents) {
   card.addEventListener('touchend', hide);
   card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') reveal(); });
   card.addEventListener('keyup', hide);
+  return card;
+}
 
+// Optional mid-game role re-check, gated by the host's allowReveal option.
+function rolePeek(app) {
+  if (!app.pub || !app.pub.allowReveal) return null;
+  if (!app.priv || !app.priv.role) return null;
+  return el('details', { class: 'role-peek' },
+    el('summary', { class: 'role-peek-summary' }, 'Peek at your role'),
+    el('p', { class: 'fine' }, 'Hold the card to reveal. Keep your screen private.'),
+    buildRoleCard(app.priv),
+  );
+}
+
+function roleRevealScreen(app, intents) {
+  const priv = app.priv;
+  const pub = app.pub;
+
+  const card = buildRoleCard(priv);
   const ready = priv && priv.ready;
   return shell(
     wordmark(),
@@ -310,6 +419,7 @@ function boardScreen(app, intents) {
     voteTrack(pub),
     rosterBoard(pub, app),
     contextPanel(app, intents),
+    rolePeek(app),
     liveRegion(phaseAnnouncement(pub)),
   );
 }
@@ -490,12 +600,22 @@ function questPanel(app, intents) {
     );
   }
 
+  // The Lunatic is compelled to Fail — offer only that.
+  if (priv.mustFail) {
+    return panel('PLAY YOUR QUEST CARD',
+      el('p', { class: 'fine' }, 'As the Lunatic, you must play ', el('span', { class: 'accent' }, 'Fail'), '.'),
+      el('div', { class: 'btn-row' },
+        el('button', { class: 'btn btn-secondary btn-fail', onclick: () => intents.playCard(false) }, '✗ FAIL')),
+    );
+  }
   const buttons = [el('button', { class: 'btn btn-primary', onclick: () => intents.playCard(true) }, '✓ SUCCESS')];
   if (priv.mayFail) {
     buttons.push(el('button', { class: 'btn btn-secondary btn-fail', onclick: () => intents.playCard(false) }, '✗ FAIL'));
   }
   return panel('PLAY YOUR QUEST CARD',
-    el('p', { class: 'fine' }, priv.mayFail ? 'You may help or sabotage.' : 'Good must play Success.'),
+    el('p', { class: 'fine' },
+      priv.mayFail ? 'You may help or sabotage.'
+                   : 'You must play Success on this quest.'),
     el('div', { class: 'btn-row' }, ...buttons),
   );
 }
@@ -520,6 +640,7 @@ function assassinationScreen(app, intents) {
       el('p', { class: 'tagline' }, 'Good completed three quests. Name ',
         el('span', { class: 'accent' }, 'Merlin'), ' to seize victory for Evil.'),
       chips,
+      rolePeek(app),
       liveRegion('Assassination phase'),
     );
   }
@@ -530,6 +651,7 @@ function assassinationScreen(app, intents) {
     el('p', { class: 'tagline' }, 'Good won the quests… but the ',
       el('span', { class: 'accent' }, 'Assassin'), ' is hunting Merlin. Hold your breath.'),
     el('div', { class: 'spinner' }),
+    rolePeek(app),
     liveRegion('The Assassin is choosing'),
   );
 }

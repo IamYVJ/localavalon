@@ -34,6 +34,7 @@ export class GameEngine {
     this.players = [];          // seat-ordered: { id, name, online, roleId, ready }
     this.hostId = null;
     this.config = null;         // role config map { roleId: count }
+    this.allowReveal = false;   // host option: let players re-check their role mid-game
     this.leaderIndex = 0;
     this.questIndex = 0;        // 0-based current quest
     this.questResults = [null, null, null, null, null]; // 'success' | 'fail' | null
@@ -65,8 +66,10 @@ export class GameEngine {
       if (existing.online) {
         return { ok: false, error: `The name "${trimmed}" is already taken.` };
       }
+      const oldId = existing.id;
       existing.online = true;
       existing.id = id; // new connection id reclaims the seat
+      if (oldId !== id) this._remapPlayerId(oldId, id); // fix mid-game id-keyed state
       if (isHost) this.hostId = id;
       return { ok: true, player: existing, reconnected: true };
     }
@@ -82,6 +85,29 @@ export class GameEngine {
     this.players.push(player);
     if (isHost) this.hostId = id;
     return { ok: true, player };
+  }
+
+  /**
+   * A reconnecting player gets a brand-new PeerJS connection id, so every place
+   * that keys state by player id (votes, quest cards, proposals, leadership,
+   * assassination) must be migrated from the old id to the new one — otherwise
+   * a mid-game reload would orphan that player's vote/card and stall the round.
+   */
+  _remapPlayerId(oldId, newId) {
+    if (oldId === newId) return;
+    if (this.hostId === oldId) this.hostId = newId;
+    if (this.assassinTargetId === oldId) this.assassinTargetId = newId;
+    if (oldId in this.votes) { this.votes[newId] = this.votes[oldId]; delete this.votes[oldId]; }
+    if (oldId in this.questCards) { this.questCards[newId] = this.questCards[oldId]; delete this.questCards[oldId]; }
+    if (this.proposal) {
+      if (this.proposal.leaderId === oldId) this.proposal.leaderId = newId;
+      if (Array.isArray(this.proposal.members)) {
+        this.proposal.members = this.proposal.members.map(m => (m === oldId ? newId : m));
+      }
+    }
+    if (Array.isArray(this.revealedVotes)) {
+      for (const r of this.revealedVotes) if (r.id === oldId) r.id = newId;
+    }
   }
 
   markOffline(id) {
@@ -103,6 +129,9 @@ export class GameEngine {
   // -------------------------------------------------------------------------
 
   setConfig(cfg) { this.config = cfg; }
+
+  /** Host toggle: when true, players may re-view their own role any time. */
+  setAllowReveal(v) { this.allowReveal = !!v; }
 
   /** Convenience used by the UI when player count changes in the lobby. */
   ensureConfig() {
@@ -236,6 +265,13 @@ export class GameEngine {
     if (ROLES[player.roleId].team === 'good' && success === false) {
       return { ok: false, error: 'Good players must play Success.' };
     }
+    // Lunatic must always Fail; Brute may only Fail on quests 1-3.
+    if (player.roleId === 'lunatic' && success === true) {
+      return { ok: false, error: 'The Lunatic must play Fail.' };
+    }
+    if (player.roleId === 'brute' && success === false && this.questIndex >= 3) {
+      return { ok: false, error: 'The Brute can only fail quests 1-3.' };
+    }
     this.questCards[id] = !!success;
     this._resolveQuestIfComplete();
     return { ok: true };
@@ -309,10 +345,70 @@ export class GameEngine {
     const players = this.players.map(p => ({ ...p, roleId: null, ready: false }));
     const config = this.config;
     const hostId = this.hostId;
+    const allowReveal = this.allowReveal;
     this.reset();
     this.players = players;
     this.config = config;
     this.hostId = hostId;
+    this.allowReveal = allowReveal;
+  }
+
+  // -------------------------------------------------------------------------
+  // Snapshot / restore — lets a HOST reload rehydrate the in-progress game.
+  // -------------------------------------------------------------------------
+
+  serialize() {
+    return JSON.parse(JSON.stringify({
+      phase: this.phase,
+      players: this.players,
+      hostId: this.hostId,
+      config: this.config,
+      allowReveal: this.allowReveal,
+      leaderIndex: this.leaderIndex,
+      questIndex: this.questIndex,
+      questResults: this.questResults,
+      rejectCount: this.rejectCount,
+      proposal: this.proposal,
+      votes: this.votes,
+      revealedVotes: this.revealedVotes,
+      questCards: this.questCards,
+      lastQuestFails: this.lastQuestFails,
+      assassinTargetId: this.assassinTargetId,
+      winner: this.winner,
+      winReason: this.winReason,
+      _voteResolved: !!this._voteResolved,
+      _lastVoteApproved: this._lastVoteApproved ?? null,
+      _questResolved: !!this._questResolved,
+    }));
+  }
+
+  restore(s) {
+    if (!s) return;
+    this.reset();
+    Object.assign(this, {
+      phase: s.phase ?? PHASES.LOBBY,
+      players: Array.isArray(s.players) ? s.players : [],
+      hostId: s.hostId ?? null,
+      config: s.config ?? null,
+      allowReveal: !!s.allowReveal,
+      leaderIndex: s.leaderIndex ?? 0,
+      questIndex: s.questIndex ?? 0,
+      questResults: s.questResults ?? [null, null, null, null, null],
+      rejectCount: s.rejectCount ?? 0,
+      proposal: s.proposal ?? null,
+      votes: s.votes ?? {},
+      revealedVotes: s.revealedVotes ?? null,
+      questCards: s.questCards ?? {},
+      lastQuestFails: s.lastQuestFails ?? null,
+      assassinTargetId: s.assassinTargetId ?? null,
+      winner: s.winner ?? null,
+      winReason: s.winReason ?? null,
+      _voteResolved: !!s._voteResolved,
+      _lastVoteApproved: s._lastVoteApproved ?? null,
+      _questResolved: !!s._questResolved,
+    });
+    // Everyone is offline until their connection re-establishes after reload.
+    this.players.forEach(p => { p.online = (p.id === this.hostId); });
   }
 
   // -------------------------------------------------------------------------
@@ -354,6 +450,7 @@ export class GameEngine {
       lastQuestFails: this.lastQuestFails,
       lastQuestResult: (this._questResolved) ? this.questResults[this.questIndex] : null,
       config: this.config,
+      allowReveal: this.allowReveal,
       readyCount: this.players.filter(p => p.ready).length,
       playerCount: this.players.length,
     };
@@ -393,7 +490,12 @@ export class GameEngine {
     if (this.phase === PHASES.QUEST && this.proposal) {
       priv.onQuest = this.proposal.members.includes(id);
       priv.hasPlayedCard = id in this.questCards;
-      priv.mayFail = priv.onQuest && p.roleId && ROLES[p.roleId].team === 'evil';
+      const isEvil = p.roleId && ROLES[p.roleId].team === 'evil';
+      // Lunatic is compelled to Fail; Brute can't Fail on quests 4-5.
+      priv.mustFail = priv.onQuest && p.roleId === 'lunatic';
+      let mayFail = priv.onQuest && isEvil;
+      if (p.roleId === 'brute' && this.questIndex >= 3) mayFail = false;
+      priv.mayFail = mayFail;
     }
     if (this.phase === PHASES.ASSASSINATION && p.roleId === 'assassin') {
       priv.isAssassin = true;

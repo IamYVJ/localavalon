@@ -79,8 +79,11 @@ that folder in the Pages settings — paths stay relative.)
 ## Game rules implemented
 
 - 5–10 players; Good:Evil splits 3:2 / 4:2 / 4:3 / 5:3 / 6:3 / 6:4.
-- Roles: Merlin & Assassin (always), plus optional Percival, Morgana, Mordred,
-  Oberon; Loyal Servants and Minions fill remaining seats.
+- Roles: Merlin & Assassin (always), plus optional **Percival**, the **Lovers**
+  (Tristan & Isolde, who see each other) on the Good side, and **Morgana**,
+  **Mordred**, **Oberon**, **Lunatic** (must Fail every quest), and **Brute**
+  (may only Fail quests 1–3) on the Evil side. Loyal Servants and Minions fill
+  the remaining seats.
 - Night knowledge computed per device: Evil see each other (except Oberon),
   Merlin sees Evil except Mordred, Percival sees Merlin + Morgana unlabeled.
 - Quest team sizes per round and the **2-fail rule** on Quest 4 at 7+ players.

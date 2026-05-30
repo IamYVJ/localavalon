@@ -196,5 +196,116 @@ function runQuestAllSuccess(engine) {
   }
 }
 
+// --- New roles: Lovers, Lunatic, Brute -------------------------------------
+{
+  // Lovers knowledge: Tristan <-> Isolde, both Good.
+  const players = [
+    { id: 'a', name: 'A', roleId: 'tristan' },
+    { id: 'b', name: 'B', roleId: 'isolde' },
+    { id: 'c', name: 'C', roleId: 'merlin' },
+    { id: 'd', name: 'D', roleId: 'assassin' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  eq(computeKnowledge(players[0], players).sees.map(s => s.id), ['b'], 'Tristan sees Isolde');
+  eq(computeKnowledge(players[1], players).sees.map(s => s.id), ['a'], 'Isolde sees Tristan');
+  // Merlin should NOT see the Lovers (they are Good).
+  const merlinSees = computeKnowledge(players[2], players).sees.map(s => s.id);
+  ok(!merlinSees.includes('a') && !merlinSees.includes('b'), 'Merlin does not see the Lovers');
+}
+
+// validateRoleConfig: Lovers must be paired.
+ok(!validateRoleConfig({ merlin: 1, assassin: 1, tristan: 1, servant: 1, minion: 1 }, 5).ok, 'Tristan without Isolde rejected');
+ok(validateRoleConfig({ merlin: 1, assassin: 1, tristan: 1, isolde: 1, servant: 1, minion: 2 }, 7).ok, 'Lovers config valid for 7p');
+ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3 }, 7).ok, 'Lunatic+Brute config valid for 7p');
+
+{
+  // Lunatic must Fail; Brute may only Fail on quests 1-3.
+  const e = new GameEngine();
+  seat(e, ['A', 'B', 'C', 'D', 'E']);
+  e.phase = PHASES.QUEST;
+  e.players[0].roleId = 'lunatic';
+  e.players[1].roleId = 'brute';
+  e.players[2].roleId = 'servant';
+  e.players[3].roleId = 'merlin';
+  e.players[4].roleId = 'assassin';
+  e.questIndex = 0;
+  e.proposal = { leaderId: 'p0', members: ['p0', 'p1'] };
+  e.questCards = {};
+  ok(!e.playQuestCard('p0', true).ok, 'Lunatic cannot play Success');
+  ok(e.playQuestCard('p0', false).ok, 'Lunatic plays Fail');
+  ok(e.playQuestCard('p1', false).ok, 'Brute may Fail on quest 1');
+
+  // Brute on quest 4 (index 3) must Succeed.
+  const e2 = new GameEngine();
+  seat(e2, ['A', 'B', 'C', 'D', 'E']);
+  e2.phase = PHASES.QUEST;
+  e2.players[1].roleId = 'brute';
+  e2.questIndex = 3;
+  e2.proposal = { leaderId: 'p0', members: ['p1'] };
+  e2.questCards = {};
+  ok(!e2.playQuestCard('p1', false).ok, 'Brute cannot Fail on quest 4');
+  ok(e2.playQuestCard('p1', true).ok, 'Brute may Succeed on quest 4');
+
+  // Private flags reflect the constraints.
+  const e3 = new GameEngine();
+  seat(e3, ['A', 'B', 'C', 'D', 'E']);
+  e3.phase = PHASES.QUEST;
+  e3.players[0].roleId = 'lunatic';
+  e3.players[1].roleId = 'brute';
+  e3.players[2].roleId = 'servant';
+  e3.players[3].roleId = 'merlin';
+  e3.players[4].roleId = 'assassin';
+  e3.questIndex = 3;
+  e3.proposal = { leaderId: 'p0', members: ['p0', 'p1'] };
+  e3.questCards = {};
+  eq(e3.privateStateFor('p0').mustFail, true, 'Lunatic mustFail flag set');
+  eq(e3.privateStateFor('p1').mayFail, false, 'Brute mayFail false on quest 4');
+}
+
+// --- Session resume: serialize/restore round-trip --------------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.setAllowReveal(true);
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  // Get into a mid-quest state with one vote/card recorded.
+  e.proposeTeam(e.leader.id, e.players.slice(0, 2).map(p => p.id));
+  e.castVote('p0', true);
+
+  const snap = e.serialize();
+  const r = new GameEngine();
+  r.restore(snap);
+  eq(r.phase, e.phase, 'restore keeps phase');
+  eq(r.allowReveal, true, 'restore keeps allowReveal');
+  eq(r.players.map(p => p.roleId), e.players.map(p => p.roleId), 'restore keeps dealt roles');
+  eq(r.votes, e.votes, 'restore keeps recorded votes');
+  eq(r.proposal, e.proposal, 'restore keeps the proposal');
+  ok(r.players.find(p => p.id === r.hostId).online, 'host is online after restore');
+  ok(r.players.filter(p => p.id !== r.hostId).every(p => !p.online), 'non-hosts offline after restore');
+}
+
+// --- Reconnect-by-name remaps mid-game id-keyed state ----------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, servant: 2, minion: 1 });
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  e.proposeTeam(e.leader.id, ['p0', 'p1']);
+  e.castVote('p1', true);
+  ok('p1' in e.votes, 'vote recorded under old id');
+
+  // p1 drops and reconnects with a brand-new connection id, same name 'B'.
+  e.markOffline('p1');
+  const rc = e.addPlayer('newconn-xyz', 'B', { isHost: false });
+  ok(rc.ok && rc.reconnected, 'reconnect by name succeeds mid-game');
+  ok(!('p1' in e.votes) && e.votes['newconn-xyz'] === true, 'vote remapped to new id');
+  ok(e.proposal.members.includes('newconn-xyz') && !e.proposal.members.includes('p1'),
+     'proposal members remapped to new id');
+  eq(e.privateStateFor('newconn-xyz').hasVoted, true, 'reconnected player still counted as voted');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

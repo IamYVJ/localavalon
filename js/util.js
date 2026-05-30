@@ -57,6 +57,44 @@ export function saveName(n) { try { localStorage.setItem(NAME_KEY, n); } catch (
 export function loadCode()  { try { return localStorage.getItem(CODE_KEY) || ''; } catch (_) { return ''; } }
 export function saveCode(c) { try { localStorage.setItem(CODE_KEY, c); } catch (_) {} }
 
+// --- Session resume (reload / rejoin returns to the same game) -------------
+// We remember whether this device was hosting or joining, the room code, and
+// the player name, plus (for a host) a snapshot of the authoritative engine so
+// a host reload can rehydrate the in-progress game. Stale sessions expire so a
+// reload days later doesn't try to rejoin a long-dead game.
+const SESSION_KEY = 'localavalon.session';
+const ENGINE_KEY  = 'localavalon.engine';
+const SESSION_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+export function saveSession(s) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, ts: Date.now() })); } catch (_) {}
+}
+export function loadSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    if (!s || !s.ts || (Date.now() - s.ts) > SESSION_TTL_MS) { clearSession(); return null; }
+    return s;
+  } catch (_) { return null; }
+}
+export function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); localStorage.removeItem(ENGINE_KEY); } catch (_) {}
+}
+
+export function saveEngineSnapshot(snap) {
+  try { localStorage.setItem(ENGINE_KEY, JSON.stringify({ snap, ts: Date.now() })); } catch (_) {}
+}
+export function loadEngineSnapshot() {
+  try {
+    const raw = localStorage.getItem(ENGINE_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || !o.ts || (Date.now() - o.ts) > SESSION_TTL_MS) return null;
+    return o.snap;
+  } catch (_) { return null; }
+}
+
 // --- DOM helpers -----------------------------------------------------------
 export function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);

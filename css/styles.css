@@ -250,6 +250,25 @@ body {
 .toggle-blurb { font-size: 12px; color: var(--muted); line-height: 1.4; }
 .count-row { display: flex; gap: 10px; }
 
+/* Read-only filler-role rows (Loyal Servant / Minion). */
+.filler-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px dashed var(--border-soft);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.filler-count {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  min-width: 28px;
+  text-align: right;
+}
+
 /* --- Hold-to-reveal flip card ------------------------------------------- */
 .flip-card {
   position: relative;
@@ -297,6 +316,22 @@ body {
 .know { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
 .know-label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
 .know-list { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+
+/* --- Mid-game role peek (collapsible) ----------------------------------- */
+.role-peek {
+  border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface); padding: 4px 14px; margin-top: 4px;
+}
+.role-peek > summary {
+  list-style: none; cursor: pointer; min-height: 44px;
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 12px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--accent);
+}
+.role-peek > summary::-webkit-details-marker { display: none; }
+.role-peek > summary::before { content: '🎭'; font-size: 14px; }
+.role-peek[open] > summary { border-bottom: 1px solid var(--border-soft); padding-bottom: 10px; margin-bottom: 6px; }
+.role-peek .flip-card { margin: 6px auto 12px; }
 
 /* --- Board --------------------------------------------------------------- */
 .board-head { display: flex; flex-direction: column; gap: 4px; }
@@ -383,6 +418,29 @@ body {
   margin: 4px 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spinner-sm { width: 18px; height: 18px; border-width: 2px; margin: 0; }
+
+/* --- Game discovery list (Join screen) ---------------------------------- */
+.discovery-status { display: flex; align-items: center; gap: 10px; padding: 6px 2px; }
+.game-list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.game-row {
+  width: 100%; min-height: 64px; display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px; text-align: left; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  color: inherit; transition: border-color 0.15s ease, background 0.15s ease;
+}
+.game-row:hover { border-color: var(--accent); background: var(--accent-dim); }
+.game-code {
+  font-family: var(--mono); font-size: 22px; font-weight: 700; letter-spacing: 0.12em;
+  color: var(--accent); flex: 0 0 auto;
+}
+.game-meta { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.game-host { font-size: 15px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.game-sub { font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; color: var(--muted); }
+.game-go { font-size: 18px; color: var(--accent); flex: 0 0 auto; }
+.game-row-busy { opacity: 0.55; cursor: not-allowed; }
+.game-row-busy:hover { border-color: var(--border); background: var(--surface); }
+.game-row-busy .game-code, .game-row-busy .game-go { color: var(--muted); }
 
 /* --- Win banner + reveal table ------------------------------------------ */
 .win-banner {

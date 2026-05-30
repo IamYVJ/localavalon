@@ -38,6 +38,10 @@ export function peerIdForCode(code) {
   return PEER_PREFIX + code.toUpperCase();
 }
 
+export function codeFromPeerId(id) {
+  return id.startsWith(PEER_PREFIX) ? id.slice(PEER_PREFIX.length) : null;
+}
+
 function newPeer(id) {
   // window.Peer comes from the PeerJS CDN <script> tag in index.html.
   const opts = BROKER_CONFIG ? { ...BROKER_CONFIG } : {};
@@ -118,6 +122,83 @@ export function joinHost(code, handlers = {}) {
     send(msg) { if (conn && conn.open) trySend(conn, msg); },
     isOpen() { return !!(conn && conn.open); },
     destroy() { try { peer.destroy(); } catch (_) {} },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DISCOVERY side — find games on the broker without typing a code.
+//
+//   IMPORTANT: peer.listAllPeers() only returns data when the signaling broker
+//   is configured with `allow_discovery: true`. PeerJS's PUBLIC cloud broker
+//   has this DISABLED, so list() will report `null` (unsupported) there. Run a
+//   self-hosted PeerServer on the LAN (see BROKER_CONFIG note) to enable it.
+//
+//   list(cb)        -> cb(codes|null)  codes = array of room codes, null = the
+//                      broker doesn't support discovery (fall back to a code).
+//   probe(code, cb) -> cb(info|null)   briefly connects to a host to fetch its
+//                      lobby info { hostName, playerCount, phase, joinable }.
+// ---------------------------------------------------------------------------
+export function createDiscovery() {
+  const peer = newPeer(null);
+  let ready = false;
+  let dead = false;
+  const queue = [];
+
+  peer.on('open', () => {
+    ready = true;
+    while (queue.length) queue.shift()();
+  });
+  peer.on('error', () => { /* swallow; surfaces as a list/probe timeout */ });
+
+  const whenReady = (fn) => { if (dead) return; if (ready) fn(); else queue.push(fn); };
+
+  return {
+    peer,
+    list(cb) {
+      whenReady(() => {
+        let done = false;
+        const finish = (codes) => { if (!done) { done = true; cb(codes); } };
+        // No callback within the window ⇒ broker has discovery disabled.
+        const timer = setTimeout(() => finish(null), 3500);
+        try {
+          peer.listAllPeers((all) => {
+            clearTimeout(timer);
+            const codes = (all || []).map(codeFromPeerId).filter(Boolean);
+            finish(codes);
+          });
+        } catch (_) {
+          clearTimeout(timer);
+          finish(null);
+        }
+      });
+    },
+    probe(code, cb) {
+      whenReady(() => {
+        let done = false;
+        let conn = null;
+        const finish = (info) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          try { if (conn) conn.close(); } catch (_) {}
+          cb(info);
+        };
+        const timer = setTimeout(() => finish(null), 4000);
+        try {
+          conn = peer.connect(peerIdForCode(code), { reliable: true });
+          conn.on('open', () => trySend(conn, { type: 'lobbyQuery' }));
+          conn.on('data', (raw) => {
+            const msg = safeParse(raw);
+            if (msg && msg.type === 'lobbyInfo') finish(msg.info);
+          });
+          conn.on('error', () => finish(null));
+          conn.on('close', () => finish(null));
+        } catch (_) {
+          finish(null);
+        }
+      });
+    },
+    destroy() { dead = true; try { peer.destroy(); } catch (_) {} },
   };
 }
 

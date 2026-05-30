@@ -61,6 +61,10 @@ export const ROLES = {
               blurb: 'Sees Merlin and Morgana, but not which is which.' },
   servant:  { id: 'servant',  name: 'Loyal Servant of Arthur',   team: 'good', optional: true,  unique: false,
               blurb: 'No special knowledge. Vote and quest wisely.' },
+  tristan:  { id: 'tristan',  name: 'Tristan',                   team: 'good', optional: true,  unique: true,
+              blurb: 'One of the Lovers — sees Isolde, who is also Good.' },
+  isolde:   { id: 'isolde',   name: 'Isolde',                    team: 'good', optional: true,  unique: true,
+              blurb: 'One of the Lovers — sees Tristan, who is also Good.' },
 
   assassin: { id: 'assassin', name: 'Assassin',                  team: 'evil', optional: false, unique: true,
               blurb: 'If Good wins 3 quests, name Merlin to steal victory for Evil.' },
@@ -70,9 +74,28 @@ export const ROLES = {
               blurb: 'Hidden from Merlin.' },
   oberon:   { id: 'oberon',   name: 'Oberon',                    team: 'evil', optional: true,  unique: true,
               blurb: 'Does not know the other Evil, and they do not know Oberon.' },
+  lunatic:  { id: 'lunatic',  name: 'Lunatic',                   team: 'evil', optional: true,  unique: true,
+              blurb: 'Must play Fail on every quest they join — they cannot help.' },
+  brute:    { id: 'brute',    name: 'Brute',                     team: 'evil', optional: true,  unique: true,
+              blurb: 'May only play Fail on the first three quests.' },
   minion:   { id: 'minion',   name: 'Minion of Mordred',         team: 'evil', optional: true,  unique: false,
               blurb: 'Knows the other Evil (except Oberon).' },
 };
+
+// ---------------------------------------------------------------------------
+// Optional-role toggles for the lobby. Each toggle maps to one or more roleIds.
+// "Lovers" adds Tristan AND Isolde together (they must be paired). Shared by
+// the lobby UI (ui.js) and the host config builder (main.js).
+// ---------------------------------------------------------------------------
+export const OPTIONAL_TOGGLES = [
+  { key: 'percival', roleIds: ['percival'],            team: 'good', label: 'Percival',          blurb: ROLES.percival.blurb },
+  { key: 'lovers',   roleIds: ['tristan', 'isolde'],   team: 'good', label: 'Tristan & Isolde',  blurb: 'The Lovers — each sees the other, and knows that person is Good.' },
+  { key: 'morgana',  roleIds: ['morgana'],             team: 'evil', label: 'Morgana',           blurb: ROLES.morgana.blurb },
+  { key: 'mordred',  roleIds: ['mordred'],             team: 'evil', label: 'Mordred',           blurb: ROLES.mordred.blurb },
+  { key: 'oberon',   roleIds: ['oberon'],              team: 'evil', label: 'Oberon',            blurb: ROLES.oberon.blurb },
+  { key: 'lunatic',  roleIds: ['lunatic'],             team: 'evil', label: 'Lunatic',           blurb: ROLES.lunatic.blurb },
+  { key: 'brute',    roleIds: ['brute'],               team: 'evil', label: 'Brute',             blurb: ROLES.brute.blurb },
+];
 
 // ---------------------------------------------------------------------------
 // Required team size for a given player count and quest index (0-based).
@@ -141,6 +164,7 @@ export function validateRoleConfig(cfg, playerCount) {
   if (!cfg.merlin)   errors.push('Merlin is required.');
   if (!cfg.assassin) errors.push('Assassin is required.');
   if (cfg.percival && !cfg.morgana) errors.push('Percival should be paired with Morgana, or he sees no decoy.');
+  if (!!cfg.tristan !== !!cfg.isolde) errors.push('Tristan and Isolde must both be in the game.');
 
   if (good !== target.good) errors.push(`Good must total ${target.good} (currently ${good}).`);
   if (evil !== target.evil) errors.push(`Evil must total ${target.evil} (currently ${evil}).`);
@@ -182,7 +206,7 @@ export function computeKnowledge(player, players) {
   const others = players.filter(p => p.id !== player.id);
 
   // Helpers
-  const evilOf = (p) => ROLES[p.roleId].team === 'evil';
+  const evilOf = (p) => !!ROLES[p.roleId] && ROLES[p.roleId].team === 'evil';
 
   if (player.roleId === 'merlin') {
     // Sees all Evil except Mordred (Oberon IS visible to Merlin).
@@ -198,6 +222,15 @@ export function computeKnowledge(player, players) {
                         .map(p => ({ id: p.id, name: p.name }));
     return { team, seesLabel: 'Merlin & Morgana (you cannot tell which is which)', sees,
              note: 'One of these is the real Merlin.' };
+  }
+
+  if (player.roleId === 'tristan' || player.roleId === 'isolde') {
+    // The Lovers see each other and know the other is Good.
+    const partner = player.roleId === 'tristan' ? 'isolde' : 'tristan';
+    const sees = others.filter(p => p.roleId === partner)
+                       .map(p => ({ id: p.id, name: p.name }));
+    return { team, seesLabel: 'Your beloved — the other Lover (Good)', sees,
+             note: 'You two can trust each other completely.' };
   }
 
   if (team === 'evil' && player.roleId !== 'oberon') {
