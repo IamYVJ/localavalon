@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Avalon">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="22%" r="85%">
+      <stop offset="0%" stop-color="#0e2521"/>
+      <stop offset="60%" stop-color="#0A0E0D"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="10" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g filter="url(#glow)">
+    <circle cx="256" cy="256" r="120" fill="none" stroke="#2FF0A8" stroke-width="18"/>
+    <circle cx="256" cy="256" r="34" fill="#2FF0A8"/>
+  </g>
+</svg>
