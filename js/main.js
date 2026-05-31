@@ -35,8 +35,9 @@ const app = {
   selectedTeam: [],               // leader's in-progress team pick
   // Optional-role toggles keyed by OPTIONAL_TOGGLES[].key (see rules.js).
   toggles: { percival: true, lovers: false, morgana: true, mordred: false, oberon: false, lunatic: false, brute: false },
-  // Host game option: let players re-check their own role at any time.
+  // Host game options.
   allowReveal: false,
+  randomLeaderOrder: false,
   _lastProposalKey: null,
   // Local-network game discovery (Join screen).
   discovered: [],            // [{ code, hostName, playerCount, phase, joinable }]
@@ -197,6 +198,9 @@ function handleIntent(playerId, msg) {
       break;
     }
     case 'assassinate': engine.assassinate(playerId, msg.targetId); hostSync(); break;
+    case 'requestStats':
+      net.sendTo(playerId, { type: 'statsData', data: getLeaderboard(app.code) });
+      break;
     default: break;
   }
 }
@@ -236,6 +240,7 @@ function startHosting() {
   engine = new GameEngine();
   engine.addPlayer(app.me.id, name, { isHost: true });
   engine.setAllowReveal(app.allowReveal);
+  engine.setRandomLeaderOrder(app.randomLeaderOrder);
   rebuildConfig();
 
   saveSession({ mode: 'host', code, name });
@@ -262,6 +267,7 @@ function resumeHosting(code, snapshot, name) {
   const hostPlayer = engine.getPlayer(app.me.id);
   if (hostPlayer) hostPlayer.online = true;
   app.allowReveal = !!engine.allowReveal;
+  app.randomLeaderOrder = !!engine.randomLeaderOrder;
   // Mirror the restored role config back into the lobby toggles so the editor
   // stays consistent if the game was reloaded while still in the lobby.
   const cfg = engine.config || {};
@@ -299,7 +305,8 @@ function startJoining(rawCode, rawName) {
     onData: (msg) => {
       switch (msg.type) {
         case 'welcome':  app.me.id = msg.playerId; break;
-        case 'state':    app.pub = msg.pub; app.priv = msg.priv; app.screen = 'game'; draw(); break;
+        case 'state':    app.pub = msg.pub; app.priv = msg.priv; if (app.screen !== 'stats') app.screen = 'game'; draw(); break;
+        case 'statsData': app.statsData = msg.data; app.screen = 'stats'; draw(); break;
         case 'rejected': clearSession(); teardownNet(); app.screen = 'join'; app.error = msg.message; startDiscovery(); draw(); break;
         case 'error':    app.error = msg.message; draw(); break;
         default: break;
@@ -430,6 +437,12 @@ const intents = {
     engine.setAllowReveal(app.allowReveal);
     hostSync();
   },
+  toggleRandomLeader: () => {
+    if (!app.me.isHost || !engine) return;
+    app.randomLeaderOrder = !app.randomLeaderOrder;
+    engine.setRandomLeaderOrder(app.randomLeaderOrder);
+    hostSync();
+  },
   startGame: () => {
     if (!app.me.isHost) return;
     const r = engine.startGame();
@@ -446,9 +459,13 @@ const intents = {
 
   // Statistics intents
   viewStats: () => {
-    app.statsData = getLeaderboard(app.code);
-    app.screen = 'stats';
-    draw();
+    if (app.me.isHost) {
+      app.statsData = getLeaderboard(app.code);
+      app.screen = 'stats';
+      draw();
+    } else if (net) {
+      net.send({ type: 'requestStats' });
+    }
   },
   backToGame: () => {
     app.screen = 'game';

@@ -35,7 +35,10 @@ export class GameEngine {
     this.hostId = null;
     this.config = null;         // role config map { roleId: count }
     this.allowReveal = false;   // host option: let players re-check their role mid-game
+    this.randomLeaderOrder = false; // host option: shuffle leader traversal order each game
     this.leaderIndex = 0;
+    this.leaderOrder = null;    // null = sequential; array of seat indices = shuffled order
+    this.leaderOrderPos = 0;    // current position within leaderOrder
     this.questIndex = 0;        // 0-based current quest
     this.questResults = [null, null, null, null, null]; // 'success' | 'fail' | null
     this.rejectCount = 0;
@@ -133,6 +136,9 @@ export class GameEngine {
   /** Host toggle: when true, players may re-view their own role any time. */
   setAllowReveal(v) { this.allowReveal = !!v; }
 
+  /** Host toggle: when true, leader order is shuffled each game instead of sequential. */
+  setRandomLeaderOrder(v) { this.randomLeaderOrder = !!v; }
+
   /** Convenience used by the UI when player count changes in the lobby. */
   ensureConfig() {
     if (!this.config && ROLE_COUNTS_OK(this.count)) {
@@ -151,6 +157,18 @@ export class GameEngine {
     // Deal roles to seats.
     const deck = shuffle(buildRoleDeck(this.config));
     this.players.forEach((p, i) => { p.roleId = deck[i]; p.ready = false; });
+
+    // Generate leader traversal order (shuffled or sequential).
+    if (this.randomLeaderOrder) {
+      const indices = this.players.map((_, i) => i);
+      this.leaderOrder = shuffle(indices);
+      this.leaderOrderPos = 0;
+      this.leaderIndex = this.leaderOrder[0];
+    } else {
+      this.leaderOrder = null;
+      this.leaderOrderPos = 0;
+      this.leaderIndex = 0;
+    }
 
     this.phase = PHASES.ROLE_REVEAL;
     return { ok: true };
@@ -175,14 +193,33 @@ export class GameEngine {
     this.questCards = {};
   }
 
-  /** Advance leadership clockwise to the next ONLINE seat. */
+  /** Advance leadership to the next player (sequential or shuffled order). */
   _advanceLeader() {
     const n = this.players.length;
-    for (let step = 1; step <= n; step++) {
-      const idx = (this.leaderIndex + step) % n;
-      if (this.players[idx].online) { this.leaderIndex = idx; return; }
+
+    if (this.leaderOrder) {
+      // Shuffled order: walk through the permutation, skipping offline players.
+      const len = this.leaderOrder.length;
+      for (let step = 1; step <= len; step++) {
+        const pos = (this.leaderOrderPos + step) % len;
+        const idx = this.leaderOrder[pos];
+        if (this.players[idx] && this.players[idx].online) {
+          this.leaderOrderPos = pos;
+          this.leaderIndex = idx;
+          return;
+        }
+      }
+      // Fallback (all offline): just advance position.
+      this.leaderOrderPos = (this.leaderOrderPos + 1) % len;
+      this.leaderIndex = this.leaderOrder[this.leaderOrderPos];
+    } else {
+      // Sequential (clockwise): skip offline players.
+      for (let step = 1; step <= n; step++) {
+        const idx = (this.leaderIndex + step) % n;
+        if (this.players[idx].online) { this.leaderIndex = idx; return; }
+      }
+      this.leaderIndex = (this.leaderIndex + 1) % n;
     }
-    this.leaderIndex = (this.leaderIndex + 1) % n; // fallback (all offline)
   }
 
   proposeTeam(leaderId, members) {
@@ -209,7 +246,8 @@ export class GameEngine {
     if (this.phase !== PHASES.VOTE) return { ok: false, error: 'Not voting now.' };
     const p = this.getPlayer(id);
     if (!p) return { ok: false, error: 'Unknown player.' };
-    if (id in this.votes) return { ok: false, error: 'You already voted.' };
+    // Once all votes are in and revealed, no more changes allowed.
+    if (this._voteResolved) return { ok: false, error: 'Voting is closed.' };
     this.votes[id] = !!approve;
     this._resolveVotesIfComplete();
     return { ok: true };
@@ -346,11 +384,13 @@ export class GameEngine {
     const config = this.config;
     const hostId = this.hostId;
     const allowReveal = this.allowReveal;
+    const randomLeaderOrder = this.randomLeaderOrder;
     this.reset();
     this.players = players;
     this.config = config;
     this.hostId = hostId;
     this.allowReveal = allowReveal;
+    this.randomLeaderOrder = randomLeaderOrder;
   }
 
   // -------------------------------------------------------------------------
@@ -364,7 +404,10 @@ export class GameEngine {
       hostId: this.hostId,
       config: this.config,
       allowReveal: this.allowReveal,
+      randomLeaderOrder: this.randomLeaderOrder,
       leaderIndex: this.leaderIndex,
+      leaderOrder: this.leaderOrder,
+      leaderOrderPos: this.leaderOrderPos,
       questIndex: this.questIndex,
       questResults: this.questResults,
       rejectCount: this.rejectCount,
@@ -391,7 +434,10 @@ export class GameEngine {
       hostId: s.hostId ?? null,
       config: s.config ?? null,
       allowReveal: !!s.allowReveal,
+      randomLeaderOrder: !!s.randomLeaderOrder,
       leaderIndex: s.leaderIndex ?? 0,
+      leaderOrder: s.leaderOrder ?? null,
+      leaderOrderPos: s.leaderOrderPos ?? 0,
       questIndex: s.questIndex ?? 0,
       questResults: s.questResults ?? [null, null, null, null, null],
       rejectCount: s.rejectCount ?? 0,
@@ -486,6 +532,7 @@ export class GameEngine {
     // Phase-specific private affordances.
     if (this.phase === PHASES.VOTE) {
       priv.hasVoted = id in this.votes;
+      priv.currentVote = (id in this.votes) ? this.votes[id] : null;
     }
     if (this.phase === PHASES.QUEST && this.proposal) {
       priv.onQuest = this.proposal.members.includes(id);

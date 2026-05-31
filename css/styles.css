@@ -146,6 +146,8 @@ body {
 .btn-fail:hover { background: var(--evil-dim); }
 .btn-disabled, .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-disabled:active { transform: none; }
+.btn-selected.btn-primary { box-shadow: 0 0 0 3px rgba(47, 240, 168, 0.4); transform: scale(1.03); }
+.btn-selected.btn-secondary { background: var(--accent-dim); box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.3); border-color: var(--evil); transform: scale(1.03); }
 
 /* --- Pills / badges ------------------------------------------------------ */
 .pill {

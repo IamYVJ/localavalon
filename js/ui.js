@@ -244,6 +244,7 @@ function lobbyScreen(app, intents) {
     children.push(el('p', { class: 'tagline' }, 'Waiting for the host to ', el('span', { class: 'accent' }, 'start the game'), '…'));
     children.push(el('div', { class: 'spinner' }));
     children.push(el('div', { class: 'btn-row' },
+      el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'LEAVE')));
   }
 
@@ -311,19 +312,31 @@ function roleConfigEditor(app, intents) {
 
 // Host-only game options (non-role settings).
 function gameOptions(app, intents) {
-  const on = !!app.allowReveal;
+  const revealOn = !!app.allowReveal;
+  const randomOn = !!app.randomLeaderOrder;
   return el('section', { class: 'config' },
     el('div', { class: 'section-label' }, 'GAME OPTIONS'),
     el('div', { class: 'toggle-list' },
-      el('label', { class: 'toggle' + (on ? ' on' : '') },
+      el('label', { class: 'toggle' + (revealOn ? ' on' : '') },
         el('input', {
-          type: 'checkbox', ...(on ? { checked: true } : {}),
+          type: 'checkbox', ...(revealOn ? { checked: true } : {}),
           onchange: () => intents.toggleReveal(),
         }),
         el('span', { class: 'toggle-box' }),
         el('span', { class: 'toggle-text' },
           el('span', { class: 'toggle-name' }, 'Re-check role anytime'),
           el('span', { class: 'toggle-blurb' }, 'Players can privately peek at their own role throughout the game.'),
+        ),
+      ),
+      el('label', { class: 'toggle' + (randomOn ? ' on' : '') },
+        el('input', {
+          type: 'checkbox', ...(randomOn ? { checked: true } : {}),
+          onchange: () => intents.toggleRandomLeader(),
+        }),
+        el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, 'Random leader order'),
+          el('span', { class: 'toggle-blurb' }, 'Shuffle the leader rotation each game instead of going around the table in order.'),
         ),
       ),
     ),
@@ -545,12 +558,15 @@ function votePanel(app, intents) {
     return panel(pub.lastVoteApproved ? 'TEAM APPROVED' : 'TEAM REJECTED', rows);
   }
 
-  const me = pub.players.find(p => p.id === app.me.id);
   const hasVoted = app.priv && app.priv.hasVoted;
+  const currentVote = app.priv ? app.priv.currentVote : null;
   const team = pub.proposal ? pub.proposal.members : [];
   const teamNames = pub.players.filter(p => team.includes(p.id)).map(p => p.name);
   const progress = pub.voteProgress || [];
   const votedCount = progress.filter(x => x.voted).length;
+
+  const approveSelected = hasVoted && currentVote === true;
+  const rejectSelected = hasVoted && currentVote === false;
 
   const header = panel('VOTE ON THE TEAM',
     el('p', { class: 'tagline' }, 'Proposed: ',
@@ -558,14 +574,18 @@ function votePanel(app, intents) {
   );
 
   if (hasVoted) {
-    header.appendChild(el('p', { class: 'fine' }, `Vote locked. ${votedCount}/${progress.length} in…`));
-    header.appendChild(el('div', { class: 'spinner' }));
-    return header;
+    header.appendChild(el('p', { class: 'fine' }, `${votedCount}/${progress.length} votes in… You can change your mind.`));
   }
 
   header.appendChild(el('div', { class: 'btn-row' },
-    el('button', { class: 'btn btn-primary', onclick: () => intents.vote(true) }, '✓ APPROVE'),
-    el('button', { class: 'btn btn-secondary', onclick: () => intents.vote(false) }, '✗ REJECT'),
+    el('button', {
+      class: 'btn btn-primary' + (approveSelected ? ' btn-selected' : ''),
+      onclick: () => intents.vote(true),
+    }, '✓ APPROVE'),
+    el('button', {
+      class: 'btn btn-secondary' + (rejectSelected ? ' btn-selected' : ''),
+      onclick: () => intents.vote(false),
+    }, '✗ REJECT'),
   ));
   return header;
 }
@@ -694,6 +714,7 @@ function gameOverScreen(app, intents) {
   } else {
     children.push(el('p', { class: 'fine' }, 'Waiting for the host to start a new round, or leave to go home.'));
     children.push(el('div', { class: 'btn-row' },
+      el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'LEAVE')));
   }
 
@@ -724,15 +745,17 @@ function statsScreen(app, intents) {
     roomSummaryBlock(summary),
     leaderboardTable(leaderboard),
     playerDetails(leaderboard),
-    el('div', { class: 'btn-row stats-actions' },
-      el('button', { class: 'btn btn-primary', onclick: intents.backToGame }, '‹ BACK TO GAME'),
-      el('button', { class: 'btn btn-danger', onclick: () => {
-        if (confirm('Reset all statistics for this room? This cannot be undone.')) {
-          intents.resetStats();
-        }
-      }}, 'RESET STATISTICS'),
-    ),
   ];
+
+  const actionBtns = [el('button', { class: 'btn btn-primary', onclick: intents.backToGame }, '‹ BACK TO GAME')];
+  if (app.me.isHost) {
+    actionBtns.push(el('button', { class: 'btn btn-danger', onclick: () => {
+      if (confirm('Reset all statistics for this room? This cannot be undone.')) {
+        intents.resetStats();
+      }
+    }}, 'RESET STATISTICS'));
+  }
+  children.push(el('div', { class: 'btn-row stats-actions' }, ...actionBtns));
 
   return shell(...children);
 }
