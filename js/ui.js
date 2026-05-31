@@ -26,6 +26,7 @@ export function render(root, app, intents) {
     case 'hostleft':   node = infoScreen('Host left', 'The host ended the game. Thanks for playing.', false,
                                           el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '> BACK HOME')); break;
     case 'game':       node = gameScreen(app, intents); break;
+    case 'stats':      node = statsScreen(app, intents); break;
     default:           node = homeScreen(app, intents);
   }
   root.appendChild(node);
@@ -236,6 +237,7 @@ function lobbyScreen(app, intents) {
         disabled: canStart ? false : true,
         onclick: () => canStart && intents.startGame(),
       }, '> START GAME'),
+      el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'LEAVE'),
     ));
   } else {
@@ -686,6 +688,7 @@ function gameOverScreen(app, intents) {
   if (app.me.isHost) {
     children.push(el('div', { class: 'btn-row' },
       el('button', { class: 'btn btn-primary', onclick: intents.playAgain }, '> PLAY AGAIN'),
+      el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'NEW GAME'),
     ));
   } else {
@@ -695,6 +698,150 @@ function gameOverScreen(app, intents) {
   }
 
   return shell(...children, liveRegion(evilWon ? 'Evil wins' : 'Good wins'));
+}
+
+// ---------------------------------------------------------------------------
+// STATISTICS / LEADERBOARD
+// ---------------------------------------------------------------------------
+function statsScreen(app, intents) {
+  const data = app.statsData;
+  if (!data) {
+    return shell(
+      wordmark(),
+      el('h1', { class: 'hero hero-sm' }, 'Statistics'),
+      el('p', { class: 'tagline' }, 'No data available.'),
+      el('div', { class: 'btn-row' },
+        el('button', { class: 'btn btn-primary', onclick: intents.backToGame }, '‹ BACK TO GAME')),
+    );
+  }
+
+  const { summary, leaderboard } = data;
+
+  const children = [
+    wordmark(),
+    el('h1', { class: 'hero hero-sm' }, 'Leaderboard'),
+    el('p', { class: 'tagline' }, 'Room ', el('span', { class: 'accent' }, app.code || '—')),
+    roomSummaryBlock(summary),
+    leaderboardTable(leaderboard),
+    playerDetails(leaderboard),
+    el('div', { class: 'btn-row stats-actions' },
+      el('button', { class: 'btn btn-primary', onclick: intents.backToGame }, '‹ BACK TO GAME'),
+      el('button', { class: 'btn btn-danger', onclick: () => {
+        if (confirm('Reset all statistics for this room? This cannot be undone.')) {
+          intents.resetStats();
+        }
+      }}, 'RESET STATISTICS'),
+    ),
+  ];
+
+  return shell(...children);
+}
+
+function roomSummaryBlock(summary) {
+  return el('section', { class: 'stats-summary' },
+    el('div', { class: 'section-label' }, 'ROOM SUMMARY'),
+    el('div', { class: 'stats-grid' },
+      statCard('Games Played', summary.gamesPlayed),
+      statCard('Good Wins', summary.goodWins, 'good'),
+      statCard('Evil Wins', summary.evilWins, 'evil'),
+    ),
+  );
+}
+
+function statCard(label, value, team) {
+  const cls = 'stat-card' + (team ? ` stat-${team}` : '');
+  return el('div', { class: cls },
+    el('div', { class: 'stat-value' }, String(value)),
+    el('div', { class: 'stat-label' }, label),
+  );
+}
+
+function leaderboardTable(leaderboard) {
+  if (leaderboard.length === 0) {
+    return el('p', { class: 'fine' }, 'No games recorded yet.');
+  }
+
+  const header = el('tr', {},
+    el('th', {}, 'Player'),
+    el('th', {}, 'GP'),
+    el('th', {}, 'W'),
+    el('th', {}, 'W%'),
+    el('th', { class: 'hide-sm' }, 'Good'),
+    el('th', { class: 'hide-sm' }, 'Evil'),
+    el('th', { class: 'hide-sm' }, 'GW'),
+    el('th', { class: 'hide-sm' }, 'EW'),
+  );
+
+  const rows = leaderboard.map((p, i) => el('tr', { class: i === 0 ? 'top-player' : '' },
+    el('td', { class: 'lb-name' }, p.name),
+    el('td', {}, String(p.gamesPlayed)),
+    el('td', {}, String(p.wins)),
+    el('td', {}, p.winPct + '%'),
+    el('td', { class: 'hide-sm' }, String(p.good)),
+    el('td', { class: 'hide-sm' }, String(p.evil)),
+    el('td', { class: 'hide-sm' }, String(p.goodWins)),
+    el('td', { class: 'hide-sm' }, String(p.evilWins)),
+  ));
+
+  return el('section', { class: 'stats-leaderboard' },
+    el('div', { class: 'section-label' }, 'PLAYER LEADERBOARD'),
+    el('div', { class: 'table-wrap' },
+      el('table', { class: 'lb-table' },
+        el('thead', {}, header),
+        el('tbody', {}, ...rows),
+      ),
+    ),
+  );
+}
+
+function playerDetails(leaderboard) {
+  if (leaderboard.length === 0) return null;
+
+  const sections = leaderboard.map(p => {
+    const roleRows = Object.entries(p.roles)
+      .filter(([_, r]) => r.played > 0)
+      .sort((a, b) => b[1].played - a[1].played)
+      .map(([rid, r]) => {
+        const roleDef = ROLES[rid];
+        const rName = roleDef ? roleDef.name : rid;
+        const rTeam = roleDef ? roleDef.team : '?';
+        const winRate = r.played > 0 ? Math.round((r.wins / r.played) * 100) : 0;
+        return el('tr', {},
+          el('td', {},
+            el('span', { class: 'role-tag ' + rTeam }, rName),
+          ),
+          el('td', {}, String(r.played)),
+          el('td', {}, String(r.wins)),
+          el('td', {}, winRate + '%'),
+        );
+      });
+
+    if (roleRows.length === 0) return null;
+
+    return el('details', { class: 'player-detail' },
+      el('summary', { class: 'player-detail-summary' },
+        el('span', { class: 'pd-name' }, p.name),
+        el('span', { class: 'pd-meta' },
+          `${p.wins}W / ${p.gamesPlayed}GP · `,
+          `Good ${p.goodWinPct}% · Evil ${p.evilWinPct}%`,
+        ),
+      ),
+      el('table', { class: 'role-table' },
+        el('thead', {}, el('tr', {},
+          el('th', {}, 'Role'),
+          el('th', {}, 'Played'),
+          el('th', {}, 'Wins'),
+          el('th', {}, 'Win%'),
+        )),
+        el('tbody', {}, ...roleRows),
+      ),
+    );
+  }).filter(Boolean);
+
+  return el('section', { class: 'stats-details' },
+    el('div', { class: 'section-label' }, 'PLAYER DETAILS'),
+    ...sections,
+  );
 }
 
 // ---------------------------------------------------------------------------

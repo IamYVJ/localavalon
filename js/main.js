@@ -17,6 +17,7 @@ import {
   loadName, saveName, loadCode, saveCode,
   saveSession, loadSession, clearSession, saveEngineSnapshot, loadEngineSnapshot,
 } from './util.js';
+import { recordGame, getLeaderboard, clearStats } from './stats.js';
 
 const root = document.getElementById('app');
 
@@ -24,7 +25,7 @@ const root = document.getElementById('app');
 // App state (everything the view needs to draw).
 // ---------------------------------------------------------------------------
 const app = {
-  screen: 'home',                 // home | join | connecting | game | error | hostleft
+  screen: 'home',                 // home | join | connecting | game | error | hostleft | stats
   me: { id: null, name: loadName(), isHost: false },
   code: loadCode(),
   pub: null,
@@ -40,6 +41,9 @@ const app = {
   // Local-network game discovery (Join screen).
   discovered: [],            // [{ code, hostName, playerCount, phase, joinable }]
   discoveryState: 'idle',    // idle | searching | ok | unsupported
+  // Statistics / leaderboard state.
+  statsData: null,           // { summary, leaderboard } from getLeaderboard()
+  _gameRecorded: false,      // prevents double-recording the same game
 };
 
 // Host-only runtime.
@@ -104,6 +108,21 @@ function hostSync() {
   app.priv = engine.privateStateFor(app.me.id);
   // Persist the authoritative state so a host reload can rehydrate the game.
   saveEngineSnapshot(engine.serialize());
+
+  // Record statistics exactly once when the game ends.
+  if (engine.phase === 'gameover' && engine.winner && !app._gameRecorded) {
+    app._gameRecorded = true;
+    const gameResult = {
+      winner: engine.winner,
+      players: engine.players.map(p => ({
+        name: p.name,
+        roleId: p.roleId,
+        team: ROLES[p.roleId] ? ROLES[p.roleId].team : null,
+      })),
+    };
+    recordGame(app.code, gameResult);
+  }
+
   draw();
 
   for (const connId of net.connections.keys()) {
@@ -419,9 +438,27 @@ const intents = {
   },
   playAgain: () => {
     if (!app.me.isHost) return;
+    app._gameRecorded = false;
     engine.playAgain();
     rebuildConfig();
     hostSync();
+  },
+
+  // Statistics intents
+  viewStats: () => {
+    app.statsData = getLeaderboard(app.code);
+    app.screen = 'stats';
+    draw();
+  },
+  backToGame: () => {
+    app.screen = 'game';
+    app.statsData = null;
+    draw();
+  },
+  resetStats: () => {
+    clearStats(app.code);
+    app.statsData = getLeaderboard(app.code);
+    draw();
   },
 
   // Per-player game intents
