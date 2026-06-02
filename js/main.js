@@ -25,8 +25,9 @@ const root = document.getElementById('app');
 // App state (everything the view needs to draw).
 // ---------------------------------------------------------------------------
 const app = {
-  screen: 'home',                 // home | join | connecting | game | error | hostleft | stats
-  me: { id: null, name: loadName(), isHost: false },
+  screen: 'home',                 // home | join | connecting | game | spectator | error | hostleft | stats
+  me: { id: null, name: loadName(), isHost: false, isSpectator: false },
+  spectatorMode: false,           // Join screen: connect as a watch-only TV spectator
   code: loadCode(),
   pub: null,
   priv: null,
@@ -102,7 +103,7 @@ function draw() {
 // Keep a 1s repaint running only while a proposal countdown is on screen, so the
 // displayed time decrements smoothly without flooding renders the rest of the time.
 function manageCountdownTicker() {
-  const active = app.screen === 'game' && app.pub
+  const active = (app.screen === 'game' || app.screen === 'spectator') && app.pub
     && app.pub.phase === 'proposal' && app.localProposalDeadline != null;
   if (active && !countdownInterval) {
     countdownInterval = setInterval(() => render(root, app, intents), 1000);
@@ -233,6 +234,17 @@ function handleIntent(playerId, msg) {
       hostSync();
       break;
     }
+    case 'spectate': {
+      // A spectator watches only the PUBLIC state — never a seat, a role, or any
+      // private slice. We deliberately do NOT call engine.addPlayer, so they
+      // don't count toward the player total and never receive secret info.
+      // privateStateFor(connId) returns null for this unseated id, and regular
+      // hostSync()s already broadcast to every connection, so just send the
+      // current public snapshot to bring them onto the spectator screen now.
+      net.sendTo(playerId, { type: 'welcome', playerId, spectator: true });
+      net.sendTo(playerId, { type: 'state', pub: engine.publicState(), priv: null });
+      break;
+    }
     case 'ready':   engine.setReady(playerId); hostSync(); break;
     case 'propose': {
       const r = engine.proposeTeam(playerId, msg.members);
@@ -358,30 +370,43 @@ function resumeHosting(code, snapshot, name) {
 // ---------------------------------------------------------------------------
 // Join an existing game.
 // ---------------------------------------------------------------------------
-function startJoining(rawCode, rawName) {
+function startJoining(rawCode, rawName, asSpectator = false) {
   const name = (rawName || '').trim();
   const code = normalizeCode(rawCode);
-  if (!name) { app.error = 'Enter your name.'; app.screen = 'join'; draw(); return; }
+  // Spectators don't need a name (they never get a seat) — default one for the
+  // host's logs. Players still must enter a name to claim their seat.
+  const effectiveName = asSpectator ? (name || 'Spectator') : name;
+  if (!asSpectator && !name) { app.error = 'Enter your name.'; app.screen = 'join'; draw(); return; }
   if (code.length !== 4) { app.error = 'Enter the full 4-character code.'; app.screen = 'join'; draw(); return; }
 
   stopDiscovery();
-  app.me.name = name; saveName(name);
+  app.me.name = name; if (name) saveName(name);
   app.code = code; saveCode(code);
   app.me.isHost = false;
+  app.me.isSpectator = asSpectator;
   app.error = '';
   app.screen = 'connecting';
-  saveSession({ mode: 'join', code, name });
+  saveSession({ mode: asSpectator ? 'spectate' : 'join', code, name: effectiveName });
   draw();
 
   net = joinHost(code, {
-    onOpen: () => net.send({ type: 'join', name }),
+    onOpen: () => net.send(asSpectator
+      ? { type: 'spectate', name: effectiveName }
+      : { type: 'join', name }),
     onNetStatus: (status) => { app.netStatus = status; draw(); },
     onData: (msg) => {
       // Any message means the link is live again — cancel a pending retry loop.
       stopClientReconnect();
       switch (msg.type) {
-        case 'welcome':  app.me.id = msg.playerId; break;
-        case 'state':    app.pub = msg.pub; app.priv = msg.priv; if (app.screen !== 'stats') app.screen = 'game'; draw(); break;
+        case 'welcome':  app.me.id = msg.playerId; app.me.isSpectator = !!msg.spectator; break;
+        case 'state': {
+          app.pub = msg.pub; app.priv = asSpectator ? null : msg.priv;
+          // Spectators land on the dedicated TV view; players on the game board.
+          if (asSpectator) app.screen = 'spectator';
+          else if (app.screen !== 'stats') app.screen = 'game';
+          draw();
+          break;
+        }
         case 'statsData': app.statsData = msg.data; app.screen = 'stats'; draw(); break;
         case 'rejected': clearSession(); teardownNet(); app.screen = 'join'; app.error = msg.message; startDiscovery(); draw(); break;
         case 'error':    app.error = msg.message; draw(); break;
@@ -544,13 +569,17 @@ const intents = {
     engine = null;
     app.screen = 'home';
     app.pub = null; app.priv = null; app.error = '';
-    app.me.isHost = false; app.me.id = null;
+    app.me.isHost = false; app.me.id = null; app.me.isSpectator = false;
+    app.spectatorMode = false;
     app.netStatus = 'online'; app._netEverOnline = false;
     draw();
   },
+  // Join screen: flip between joining as a player and watching as a spectator.
+  toggleSpectatorMode: () => { app.spectatorMode = !app.spectatorMode; app.error = ''; draw(); },
 
   host: () => startHosting(),
   join: (code, name) => startJoining(code, name),
+  spectate: (code, name) => startJoining(code, name, true),
 
   copyCode: async () => {
     if (!app.code) return;
@@ -666,6 +695,11 @@ function resumeSession() {
   if (s.mode === 'join' && s.name) {
     // Reconnect to the host; the engine reclaims our seat (and role) by name.
     startJoining(s.code, s.name);
+    return true;
+  }
+  if (s.mode === 'spectate') {
+    // Re-attach as a watch-only spectator (no seat to reclaim).
+    startJoining(s.code, s.name, true);
     return true;
   }
   return false;

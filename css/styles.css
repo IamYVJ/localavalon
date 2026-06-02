@@ -651,6 +651,150 @@ body {
 }
 .pending-done { margin-top: 12px; color: var(--muted); }
 
+/* --- Spectator toggle (Join screen) -------------------------------------- */
+.spectator-toggle { margin-top: 4px; }
+
+/* ===========================================================================
+   SPECTATOR / TV VIEW — a single, non-scrolling public display. Everything is
+   sized to the viewport with clamp() so a wall-mounted screen never needs a
+   touch. Shows only public info; never a role or team during play.
+   =========================================================================== */
+.tv-shell {
+  height: 100dvh; max-width: none; margin: 0;
+  padding: clamp(12px, 2.2vh, 28px) clamp(16px, 3vw, 48px);
+  display: flex; flex-direction: column; gap: clamp(10px, 1.8vh, 22px);
+  overflow: hidden;
+  animation: fade 0.35s ease;
+}
+
+.tv-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.tv-brand {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--mono); letter-spacing: 0.16em; text-transform: uppercase;
+  font-size: clamp(11px, 1.4vw, 16px); color: var(--muted);
+}
+.tv-code { display: flex; align-items: baseline; gap: 10px; }
+.tv-code-label { font-family: var(--mono); font-size: clamp(10px, 1vw, 13px); letter-spacing: 0.18em; color: var(--muted); }
+.tv-code-value { font-family: var(--mono); font-weight: 700; letter-spacing: 0.12em; font-size: clamp(22px, 3.6vw, 44px); color: var(--accent); }
+.tv-badge {
+  font-family: var(--mono); letter-spacing: 0.2em; font-size: clamp(10px, 1vw, 13px);
+  padding: 6px 14px; border: 1px solid var(--border); border-radius: 999px;
+  color: var(--accent); background: var(--accent-dim);
+}
+
+/* Quest track */
+.tv-quests { display: grid; grid-template-columns: repeat(5, 1fr); gap: clamp(8px, 1.4vw, 18px); }
+.tv-quest {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: clamp(8px, 1.6vh, 18px); text-align: center;
+  border: 1px solid var(--border-soft); border-radius: 16px; background: var(--surface);
+}
+.tv-quest.current { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.tv-quest.success { border-color: var(--accent); background: var(--accent-dim); }
+.tv-quest.fail { border-color: var(--evil); background: var(--evil-dim); }
+.tv-quest-num { font-family: var(--mono); letter-spacing: 0.12em; font-size: clamp(11px, 1.2vw, 16px); color: var(--muted); }
+.tv-quest-size { font-family: var(--serif); line-height: 1; font-size: clamp(26px, 4.4vw, 56px); }
+.tv-quest-mark { font-family: var(--mono); min-height: 1em; font-size: clamp(14px, 1.8vw, 24px); }
+.tv-quest.success .tv-quest-mark { color: var(--accent); }
+.tv-quest.fail .tv-quest-mark { color: var(--evil); }
+
+/* Body split: roster (+ quest track) on the left, status on the right */
+.tv-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1.2fr 1fr; gap: clamp(12px, 2vw, 28px); }
+.tv-body-lobby { grid-template-columns: 1fr 1fr; }
+.tv-left { min-height: 0; display: flex; flex-direction: column; gap: clamp(10px, 1.8vh, 20px); }
+.tv-left .tv-roster { flex: 1; }
+
+.tv-roster {
+  list-style: none; margin: 0; padding: 0; min-height: 0; overflow: hidden;
+  display: grid; grid-template-columns: 1fr 1fr; gap: clamp(6px, 1vh, 12px); align-content: start;
+}
+.tv-player {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: clamp(8px, 1.4vh, 16px) clamp(12px, 1.6vw, 20px);
+  border: 1px solid var(--border-soft); border-radius: 14px; background: var(--surface);
+}
+.tv-player.is-leader { border-color: var(--accent); }
+.tv-player.on-team { background: var(--accent-dim); }
+.tv-player.off { opacity: 0.5; }
+.tv-player-name {
+  font-family: var(--serif); font-size: clamp(16px, 2vw, 30px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tv-player-tags { display: flex; gap: 6px; flex-shrink: 0; }
+.tv-tag {
+  font-family: var(--mono); letter-spacing: 0.1em; font-size: clamp(9px, 0.9vw, 12px);
+  padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-soft); color: var(--muted);
+}
+.tv-tag-lead { color: var(--accent); border-color: var(--border); }
+.tv-tag-good { color: var(--accent); border-color: var(--border); }
+.tv-tag-evil { color: var(--evil); border-color: var(--evil); }
+
+/* Status panel */
+.tv-status {
+  min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;
+  gap: clamp(10px, 1.8vh, 20px);
+  border: 1px solid var(--border-soft); border-radius: 20px; background: var(--surface);
+  padding: clamp(16px, 3vh, 40px);
+}
+.tv-status-label { font-family: var(--mono); letter-spacing: 0.18em; font-size: clamp(12px, 1.4vw, 18px); color: var(--muted); }
+.tv-lead { margin: 0; font-family: var(--serif); font-size: clamp(22px, 3vw, 40px); }
+.tv-lead.evil { color: var(--evil); }
+.tv-sub { margin: 0; color: var(--muted); font-size: clamp(13px, 1.4vw, 20px); }
+.tv-bigstat { margin: 0; font-family: var(--serif); font-size: clamp(40px, 7vw, 96px); }
+.tv-bigstat.good { color: var(--accent); }
+.tv-bigstat.evil { color: var(--evil); }
+
+/* Vote tally + open votes */
+.tv-tally { display: flex; gap: clamp(16px, 3vw, 40px); }
+.tv-tally-cell { font-family: var(--mono); font-weight: 700; font-size: clamp(28px, 4vw, 56px); }
+.tv-tally-cell.good { color: var(--accent); }
+.tv-tally-cell.evil { color: var(--evil); }
+.tv-votes { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; overflow: hidden; }
+.tv-vote {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--border-soft); font-family: var(--mono); font-size: clamp(12px, 1.2vw, 16px);
+}
+.tv-vote.yes .tv-vote-mark { color: var(--accent); }
+.tv-vote.no .tv-vote-mark { color: var(--evil); }
+
+/* Spectator countdown */
+.tv-timer { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.tv-timer-clock { font-family: var(--mono); font-weight: 700; font-size: clamp(40px, 6vw, 80px); color: var(--accent); }
+.tv-timer.urgent .tv-timer-clock { color: var(--evil); animation: reconnect-pulse 1s ease-in-out infinite; }
+
+/* Footer: leader caption + reject track */
+.tv-foot { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.tv-foot-leader { font-family: var(--mono); letter-spacing: 0.12em; font-size: clamp(12px, 1.4vw, 18px); color: var(--muted); }
+.tv-rejects { display: flex; align-items: center; gap: clamp(8px, 1.2vw, 16px); }
+.tv-rejects-label, .tv-rejects-warn { font-family: var(--mono); letter-spacing: 0.14em; font-size: clamp(10px, 1vw, 13px); color: var(--muted); }
+.tv-rejects-warn { color: var(--evil); opacity: 0.8; }
+.tv-rejects-dots { display: flex; gap: 8px; }
+.tv-reject-dot { width: clamp(12px, 1.4vw, 20px); height: clamp(12px, 1.4vw, 20px); border-radius: 50%; border: 1px solid var(--border); }
+.tv-reject-dot.filled { background: var(--evil); border-color: var(--evil); }
+
+/* Game over: winner banner + full reveal */
+.tv-body-over { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: clamp(14px, 2.4vh, 28px); overflow: hidden; }
+.tv-win { text-align: center; padding: clamp(14px, 2.4vh, 28px); border-radius: 20px; border: 1px solid var(--border-soft); }
+.tv-win.good { background: var(--accent-dim); border-color: var(--accent); }
+.tv-win.evil { background: var(--evil-dim); border-color: var(--evil); }
+.tv-win-side { font-family: var(--serif); font-size: clamp(34px, 6vw, 84px); }
+.tv-win.good .tv-win-side { color: var(--accent); }
+.tv-win.evil .tv-win-side { color: var(--evil); }
+.tv-win-reason { color: var(--muted); font-size: clamp(13px, 1.6vw, 22px); }
+.tv-reveal-grid {
+  flex: 1; min-height: 0; overflow: hidden; align-content: start;
+  display: grid; gap: clamp(8px, 1.4vw, 16px); grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+.tv-reveal-card {
+  display: flex; flex-direction: column; gap: 6px; align-items: flex-start;
+  padding: clamp(10px, 1.6vh, 18px); border-radius: 14px; border: 1px solid var(--border-soft); background: var(--surface);
+}
+.tv-reveal-card.good { border-left: 4px solid var(--accent); }
+.tv-reveal-card.evil { border-left: 4px solid var(--evil); }
+.tv-reveal-name { font-family: var(--serif); font-size: clamp(16px, 1.8vw, 26px); }
+.tv-reveal-role { font-family: var(--mono); font-size: clamp(12px, 1.2vw, 16px); color: var(--muted); }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }

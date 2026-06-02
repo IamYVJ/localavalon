@@ -474,5 +474,40 @@ ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3
   ok(e2.showPendingVoters, 'playAgain preserves pending-voters flag');
 }
 
+// --- Spectator privacy contract --------------------------------------------
+// A spectator is never seated (no addPlayer), so the host derives their state
+// from publicState() + privateStateFor(theirConnId). This locks in the two
+// guarantees the spectator view relies on: an unseated id gets NO private slice,
+// and mid-game publicState() never leaks roles/teams.
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.startGame();
+
+  eq(e.privateStateFor('spectator-conn'), null, 'unseated id gets null private state');
+  e.markOffline('spectator-conn'); // must be a harmless no-op for a non-player
+  eq(e.count, 5, 'spectator id never affects player count');
+
+  const pubReveal = e.publicState();
+  ok(pubReveal.players.every(p => !('roleId' in p) && !('team' in p) && !('role' in p)),
+    'mid-game publicState exposes no roles/teams (safe for spectators)');
+  eq(pubReveal.reveal, undefined, 'no full reveal before game over');
+
+  // After game over the reveal becomes public — spectators may then see roles.
+  e.players.forEach(p => e.setReady(p.id));
+  for (let q = 0; q < 3; q++) {
+    const need = teamSize(5, e.questIndex);
+    e.proposeTeam(e.leader.id, e.players.slice(0, need).map(p => p.id));
+    approveAll(e);
+    runQuestAllSuccess(e);
+  }
+  // Good completed 3 quests → assassination; a wrong guess ends the game.
+  const wrong = e.players.find(p => p.roleId !== 'merlin' && ROLES[p.roleId].team === 'good');
+  e.assassinate(e.players.find(p => p.roleId === 'assassin').id, wrong.id);
+  eq(e.phase, PHASES.GAMEOVER, 'game reached game over');
+  ok(Array.isArray(e.publicState().reveal), 'full reveal present at game over');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

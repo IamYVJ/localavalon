@@ -26,6 +26,7 @@ export function render(root, app, intents) {
     case 'hostleft':   node = infoScreen('Host left', 'The host ended the game. Thanks for playing.', false,
                                           el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '> BACK HOME')); break;
     case 'game':       node = gameScreen(app, intents); break;
+    case 'spectator':  node = spectatorScreen(app, intents); break;
     case 'stats':      node = statsScreen(app, intents); break;
     default:           node = homeScreen(app, intents);
   }
@@ -98,11 +99,28 @@ function joinScreen(app, intents) {
     oninput: (e) => { e.target.value = e.target.value.toUpperCase(); },
   });
 
+  const spectate = !!app.spectatorMode;
+
+  // Watch-only spectator toggle. A spectator sees only public game info (never
+  // roles) on a single TV-optimised screen — ideal for a shared display.
+  const spectatorToggle = el('label', { class: 'toggle spectator-toggle' + (spectate ? ' on' : '') },
+    el('input', {
+      type: 'checkbox', ...(spectate ? { checked: true } : {}),
+      onchange: () => intents.toggleSpectatorMode(),
+    }),
+    el('span', { class: 'toggle-box' }),
+    el('span', { class: 'toggle-text' },
+      el('span', { class: 'toggle-name' }, 'Watch as spectator (TV mode)'),
+      el('span', { class: 'toggle-blurb' }, 'A single-screen public view for a shared display — no roles, no controls. You can watch a game that\'s already in progress.'),
+    ),
+  );
+
   const children = [
     wordmark(),
-    el('h1', { class: 'hero hero-sm' }, 'Join a game'),
+    el('h1', { class: 'hero hero-sm' }, spectate ? 'Watch a game' : 'Join a game'),
     el('p', { class: 'tagline' }, 'Pick a game on your ', el('span', { class: 'accent' }, 'Wi-Fi'), ' — or enter a code.'),
-    el('div', { class: 'field-group' }, nameInput),
+    spectate ? null : el('div', { class: 'field-group' }, nameInput),
+    el('div', { class: 'toggle-list' }, spectatorToggle),
     el('div', { class: 'section-label' }, 'GAMES ON THIS NETWORK'),
     discoveryList(app, intents, nameInput),
     el('div', { class: 'section-label' }, 'OR ENTER A CODE'),
@@ -111,8 +129,9 @@ function joinScreen(app, intents) {
     el('div', { class: 'btn-row' },
       el('button', {
         class: 'btn btn-primary',
-        onclick: () => intents.join(codeInput.value, nameInput.value),
-      }, '> CONNECT'),
+        onclick: () => (spectate ? intents.spectate(codeInput.value, nameInput.value)
+                                 : intents.join(codeInput.value, nameInput.value)),
+      }, spectate ? '▷ WATCH' : '> CONNECT'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '‹ BACK'),
     ),
   ];
@@ -143,24 +162,34 @@ function discoveryList(app, intents, nameInput) {
       'No open games found yet. Make sure you’re on the same Wi-Fi as the host, or enter a code below.');
   }
 
+  const spectate = !!app.spectatorMode;
+
   return el('ul', { class: 'game-list' },
-    ...games.map(g => el('li', {},
-      el('button', {
-        class: 'game-row' + (g.joinable ? '' : ' game-row-busy'),
-        disabled: g.joinable ? false : true,
-        onclick: () => g.joinable && intents.join(g.code, nameInput.value),
-      },
-        el('span', { class: 'game-code' }, g.code),
-        el('span', { class: 'game-meta' },
-          el('span', { class: 'game-host' }, (g.hostName || 'Host') + '’s game'),
-          el('span', { class: 'game-sub' },
-            g.joinable
-              ? `${g.playerCount} ${g.playerCount === 1 ? 'player' : 'players'} in lobby`
-              : 'In progress — can’t join'),
+    ...games.map(g => {
+      // Spectators may watch ANY game (lobby or in-progress); players can only
+      // enter a game still in its lobby.
+      const actionable = spectate ? true : g.joinable;
+      const act = () => actionable && (spectate
+        ? intents.spectate(g.code, nameInput.value)
+        : intents.join(g.code, nameInput.value));
+      return el('li', {},
+        el('button', {
+          class: 'game-row' + (actionable ? '' : ' game-row-busy'),
+          disabled: actionable ? false : true,
+          onclick: act,
+        },
+          el('span', { class: 'game-code' }, g.code),
+          el('span', { class: 'game-meta' },
+            el('span', { class: 'game-host' }, (g.hostName || 'Host') + '’s game'),
+            el('span', { class: 'game-sub' },
+              g.joinable
+                ? `${g.playerCount} ${g.playerCount === 1 ? 'player' : 'players'} in lobby`
+                : (spectate ? 'In progress — watch live' : 'In progress — can’t join')),
+          ),
+          el('span', { class: 'game-go' }, actionable ? '▷' : '🔒'),
         ),
-        el('span', { class: 'game-go' }, g.joinable ? '▷' : '🔒'),
-      ),
-    )),
+      );
+    }),
   );
 }
 
@@ -823,6 +852,235 @@ function gameOverScreen(app, intents) {
   }
 
   return shell(...children, liveRegion(evilWon ? 'Evil wins' : 'Good wins'));
+}
+
+// ---------------------------------------------------------------------------
+// SPECTATOR — a single-screen, TV-optimised PUBLIC view. No scrolling, no
+// controls, and never any secret info: a spectator is just another client that
+// receives publicState() with priv=null, so it can ONLY ever show what every
+// player already sees on the shared board (roster, quest track, rejects, the
+// current phase, vote tallies once revealed, and the full reveal at game over).
+// Everything is sized to the viewport so a wall display can stay untouched.
+// ---------------------------------------------------------------------------
+function spectatorScreen(app, intents) {
+  const pub = app.pub;
+  if (!pub) return infoScreen('Connecting…', `Joining room ${app.code} as a spectator.`, true);
+
+  const head = el('header', { class: 'tv-head' },
+    el('div', { class: 'tv-brand' },
+      el('span', { class: 'wordmark-dot' }), 'THE RESISTANCE · AVALON'),
+    el('div', { class: 'tv-code' },
+      el('span', { class: 'tv-code-label' }, 'ROOM'),
+      el('span', { class: 'tv-code-value' }, app.code || '----')),
+    el('div', { class: 'tv-badge' }, 'SPECTATOR'),
+  );
+
+  // Game over: hand the whole stage to the winner banner + full role reveal.
+  if (pub.phase === 'gameover') {
+    return el('main', { class: 'tv-shell tv-over' }, head, tvGameOver(pub),
+      liveRegion(pub.winner === 'evil' ? 'Evil wins' : 'Good wins'));
+  }
+
+  const body = (pub.phase === 'lobby')
+    ? el('section', { class: 'tv-body tv-body-lobby' }, tvRoster(pub), tvStatus(app))
+    : el('section', { class: 'tv-body' },
+        el('div', { class: 'tv-left' }, tvQuestTrack(pub), tvRoster(pub)),
+        tvStatus(app),
+      );
+
+  return el('main', { class: 'tv-shell' },
+    head,
+    body,
+    tvFoot(pub),
+    liveRegion(phaseAnnouncement(pub)),
+  );
+}
+
+// Large quest track for the TV view (Q1–Q5 with team sizes + results).
+function tvQuestTrack(pub) {
+  const sizes = pub.questSizes || [];
+  const nodes = sizes.map((sz, i) => {
+    const res = pub.questResults[i];
+    let cls = 'tv-quest';
+    if (res === 'success') cls += ' success';
+    else if (res === 'fail') cls += ' fail';
+    else if (i === pub.currentQuest) cls += ' current';
+    const twoFail = (i === 3 && pub.playerCount >= 7);
+    return el('div', { class: cls },
+      el('div', { class: 'tv-quest-num' }, `Q${i + 1}`),
+      el('div', { class: 'tv-quest-size' }, String(sz)),
+      el('div', { class: 'tv-quest-mark' },
+        res === 'success' ? '✓' : res === 'fail' ? '✗' : (twoFail ? '2✗' : '')),
+    );
+  });
+  return el('div', { class: 'tv-quests' }, ...nodes);
+}
+
+// Player tiles — names only, plus public markers (leader, on-quest, online).
+// NEVER renders a role or team: a spectator screen must reveal nothing secret.
+function tvRoster(pub) {
+  const proposed = new Set(pub.proposal ? pub.proposal.members : []);
+  const n = pub.players.length;
+  return el('ul', { class: 'tv-roster', 'data-n': String(n) },
+    ...pub.players.map(p => el('li', {
+      class: 'tv-player'
+        + (p.isLeader ? ' is-leader' : '')
+        + (proposed.has(p.id) ? ' on-team' : '')
+        + (p.online ? '' : ' off'),
+    },
+      el('span', { class: 'tv-player-name' }, p.name),
+      el('span', { class: 'tv-player-tags' },
+        p.isLeader ? el('span', { class: 'tv-tag tv-tag-lead' }, 'LEADER') : null,
+        proposed.has(p.id) ? el('span', { class: 'tv-tag' }, 'ON QUEST') : null,
+        p.online ? null : el('span', { class: 'tv-tag tv-tag-off' }, 'AWAY'),
+      ),
+    )),
+  );
+}
+
+// Reject track + a one-line leader/phase caption along the bottom.
+function tvFoot(pub) {
+  const leader = pub.players.find(p => p.id === pub.leaderId);
+  const dots = [];
+  for (let i = 0; i < pub.maxRejects; i++) {
+    dots.push(el('span', { class: 'tv-reject-dot' + (i < pub.rejectCount ? ' filled' : '') }));
+  }
+  return el('footer', { class: 'tv-foot' },
+    el('div', { class: 'tv-foot-leader' },
+      'LEADER ', el('span', { class: 'accent' }, leader ? leader.name : '—')),
+    el('div', { class: 'tv-rejects' },
+      el('span', { class: 'tv-rejects-label' }, 'REJECTS'),
+      el('span', { class: 'tv-rejects-dots' }, ...dots),
+      el('span', { class: 'tv-rejects-warn' }, 'EVIL WINS AT 5'),
+    ),
+  );
+}
+
+// The central status panel: a big, glanceable summary of the current beat.
+function tvStatus(app) {
+  const pub = app.pub;
+  switch (pub.phase) {
+    case 'lobby': {
+      return tvPanel('IN THE LOBBY',
+        el('p', { class: 'tv-lead' }, `${pub.playerCount} ${pub.playerCount === 1 ? 'player' : 'players'} joined`),
+        el('p', { class: 'tv-sub' }, 'Waiting for the host to start the game…'),
+      );
+    }
+    case 'roleReveal': {
+      return tvPanel('ROLES DEALT',
+        el('p', { class: 'tv-lead' }, `${pub.readyCount}/${pub.playerCount} ready`),
+        el('p', { class: 'tv-sub' }, 'Players are reviewing their secret roles in private.'),
+      );
+    }
+    case 'proposal': {
+      const leader = pub.players.find(p => p.id === pub.leaderId);
+      return tvPanel(`QUEST ${pub.currentQuest + 1} · PROPOSAL`,
+        el('p', { class: 'tv-lead' },
+          el('span', { class: 'accent' }, leader ? leader.name : 'The leader'),
+          ' is choosing a team'),
+        el('p', { class: 'tv-sub' }, `Team needs ${pub.requiredTeamSize} player${pub.requiredTeamSize === 1 ? '' : 's'}.`),
+        tvCountdown(app),
+      );
+    }
+    case 'vote': {
+      // Reveal beat: show the outcome + each player's open vote (public once in).
+      if (pub.revealedVotes && pub.voteResolved) {
+        const approves = pub.revealedVotes.filter(v => v.vote === true).length;
+        const rejects = pub.revealedVotes.filter(v => v.vote === false).length;
+        return tvPanel(pub.lastVoteApproved ? 'TEAM APPROVED' : 'TEAM REJECTED',
+          el('div', { class: 'tv-tally' },
+            el('span', { class: 'tv-tally-cell good' }, `✓ ${approves}`),
+            el('span', { class: 'tv-tally-cell evil' }, `✗ ${rejects}`),
+          ),
+          el('ul', { class: 'tv-votes' },
+            ...pub.revealedVotes.map(v => el('li', {
+              class: 'tv-vote ' + (v.vote === true ? 'yes' : v.vote === false ? 'no' : 'na'),
+            }, el('span', { class: 'tv-vote-name' }, v.name),
+               el('span', { class: 'tv-vote-mark' }, v.vote === null ? '—' : (v.vote ? '✓' : '✗')))),
+          ),
+        );
+      }
+      const team = pub.proposal ? pub.proposal.members : [];
+      const teamNames = pub.players.filter(p => team.includes(p.id)).map(p => p.name);
+      const progress = pub.voteProgress || [];
+      const votedCount = progress.filter(x => x.voted).length;
+      const children = [
+        el('p', { class: 'tv-lead' }, 'Proposed: ',
+          el('span', { class: 'accent' }, teamNames.join(', ') || '—')),
+        el('p', { class: 'tv-sub' }, `${votedCount}/${progress.length} votes in…`),
+      ];
+      // Host option: surface WHO still owes a vote (never how anyone voted).
+      if (pub.showPendingVoters) {
+        const pending = pendingVotersBlock(pub);
+        if (pending) children.push(pending);
+      }
+      return tvPanel(`QUEST ${pub.currentQuest + 1} · VOTE`, ...children);
+    }
+    case 'quest': {
+      if (pub.questResolved) {
+        const ok = pub.lastQuestResult === 'success';
+        return tvPanel(ok ? `QUEST ${pub.currentQuest + 1} SUCCEEDED` : `QUEST ${pub.currentQuest + 1} FAILED`,
+          el('p', { class: 'tv-bigstat ' + (ok ? 'good' : 'evil') },
+            `${pub.lastQuestFails} fail${pub.lastQuestFails === 1 ? '' : 's'}`),
+          el('p', { class: 'tv-sub' }, 'Tallying the next round…'),
+        );
+      }
+      const progress = pub.questProgress || [];
+      const played = progress.filter(x => x.played).length;
+      return tvPanel(`QUEST ${pub.currentQuest + 1} · UNDERWAY`,
+        el('p', { class: 'tv-lead' }, 'The team is deciding the quest\'s fate'),
+        el('p', { class: 'tv-sub' }, `${played}/${progress.length} cards played…`),
+      );
+    }
+    case 'assassination': {
+      return tvPanel('THE ASSASSIN STRIKES',
+        el('p', { class: 'tv-lead evil' }, 'Good completed three quests'),
+        el('p', { class: 'tv-sub' }, 'The Assassin is hunting Merlin. Hold your breath…'),
+      );
+    }
+    default:
+      return tvPanel('', el('div', { class: 'spinner' }));
+  }
+}
+
+// Game-over stage for the TV: winner banner + full role reveal (public now).
+function tvGameOver(pub) {
+  const evilWon = pub.winner === 'evil';
+  const cards = (pub.reveal || []).map(r => el('div', { class: 'tv-reveal-card ' + (r.team === 'evil' ? 'evil' : 'good') },
+    el('span', { class: 'tv-reveal-name' }, r.name + (r.id === pub.assassinTargetId ? ' 🗡' : '')),
+    el('span', { class: 'tv-reveal-role' }, r.roleName),
+    el('span', { class: 'tv-tag ' + (r.team === 'evil' ? 'tv-tag-evil' : 'tv-tag-good') },
+      r.team === 'evil' ? 'EVIL' : 'GOOD'),
+  ));
+  return el('section', { class: 'tv-body tv-body-over' },
+    el('div', { class: 'tv-win ' + (evilWon ? 'evil' : 'good') },
+      el('div', { class: 'tv-win-side' }, evilWon ? 'EVIL WINS' : 'GOOD WINS'),
+      el('div', { class: 'tv-win-reason' }, pub.winReason || ''),
+    ),
+    el('div', { class: 'tv-reveal-grid', 'data-n': String((pub.reveal || []).length) }, ...cards),
+  );
+}
+
+// Spectator countdown — reuses the local proposal deadline that main.js keeps
+// in sync (it drives a 1s repaint while the spectator screen is on, too).
+function tvCountdown(app) {
+  if (app.localProposalDeadline == null) return null;
+  const remMs = Math.max(0, app.localProposalDeadline - Date.now());
+  const totalSec = Math.ceil(remMs / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const urgent = totalSec <= 30;
+  return el('div', { class: 'tv-timer' + (urgent ? ' urgent' : '') },
+    el('span', { class: 'timer-eyebrow' }, 'TIME LEFT'),
+    el('span', { class: 'tv-timer-clock' }, `${m}:${String(s).padStart(2, '0')}`),
+  );
+}
+
+function tvPanel(label, ...children) {
+  return el('section', { class: 'tv-status' },
+    label ? el('div', { class: 'tv-status-label' }, label) : null,
+    ...children,
+  );
 }
 
 // ---------------------------------------------------------------------------
