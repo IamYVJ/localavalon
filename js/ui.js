@@ -30,6 +30,15 @@ export function render(root, app, intents) {
     default:           node = homeScreen(app, intents);
   }
   root.appendChild(node);
+
+  // Connection-recovery banner: shown over any screen while the peer link is
+  // being re-established (e.g. the host briefly backgrounded their browser).
+  if (app.netStatus === 'reconnecting') {
+    root.appendChild(el('div', { class: 'reconnect-banner', role: 'status', 'aria-live': 'polite' },
+      el('span', { class: 'reconnect-dot' }),
+      'Reconnecting…',
+    ));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +323,24 @@ function roleConfigEditor(app, intents) {
 function gameOptions(app, intents) {
   const revealOn = !!app.allowReveal;
   const randomOn = !!app.randomLeaderOrder;
+  const timerOn = !!app.questTimerEnabled;
+  const pendingOn = !!app.showPendingVoters;
+  const timerMin = Math.round((app.questTimerSeconds || 120) / 60);
+
+  // Minute picker (1-5), shown only when the proposal timer is enabled.
+  const minutePicker = timerOn
+    ? el('div', { class: 'timer-picker' },
+        el('span', { class: 'timer-picker-label' }, 'MINUTES PER PROPOSAL'),
+        el('div', { class: 'timer-picker-row' },
+          ...[1, 2, 3, 4, 5].map(m => el('button', {
+            type: 'button',
+            class: 'timer-chip' + (m === timerMin ? ' sel' : ''),
+            onclick: () => intents.setQuestTimerMinutes(m),
+          }, String(m))),
+        ),
+      )
+    : null;
+
   return el('section', { class: 'config' },
     el('div', { class: 'section-label' }, 'GAME OPTIONS'),
     el('div', { class: 'toggle-list' },
@@ -339,7 +366,30 @@ function gameOptions(app, intents) {
           el('span', { class: 'toggle-blurb' }, 'Shuffle the leader rotation each game instead of going around the table in order.'),
         ),
       ),
+      el('label', { class: 'toggle' + (timerOn ? ' on' : '') },
+        el('input', {
+          type: 'checkbox', ...(timerOn ? { checked: true } : {}),
+          onchange: () => intents.toggleQuestTimer(),
+        }),
+        el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, 'Proposal timer'),
+          el('span', { class: 'toggle-blurb' }, 'Give the leader a countdown to pick each quest team. Time-out passes leadership to the next player (no penalty).'),
+        ),
+      ),
+      el('label', { class: 'toggle' + (pendingOn ? ' on' : '') },
+        el('input', {
+          type: 'checkbox', ...(pendingOn ? { checked: true } : {}),
+          onchange: () => intents.toggleShowPendingVoters(),
+        }),
+        el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, 'Show pending voters'),
+          el('span', { class: 'toggle-blurb' }, 'During the team vote, show everyone which players still haven\'t voted — no hint at how they voted.'),
+        ),
+      ),
     ),
+    minutePicker,
   );
 }
 
@@ -430,7 +480,9 @@ function boardScreen(app, intents) {
   const pub = app.pub;
   return shell(
     boardHeader(pub),
-    questTrack(pub),
+    // The quest progress row stays pinned to the top so it's always visible,
+    // even after scrolling past the roster on smaller screens.
+    el('div', { class: 'quest-track-sticky' }, questTrack(pub)),
     voteTrack(pub),
     rosterBoard(pub, app),
     contextPanel(app, intents),
@@ -513,6 +565,7 @@ function proposalPanel(app, intents) {
   if (!isLeader) {
     const leader = pub.players.find(p => p.id === pub.leaderId);
     return panel('TEAM PROPOSAL',
+      proposalCountdown(app),
       el('p', { class: 'tagline' }, 'Waiting for ',
         el('span', { class: 'accent' }, leader ? leader.name : 'the leader'),
         ` to propose a team of ${need}.`),
@@ -530,6 +583,7 @@ function proposalPanel(app, intents) {
   );
   const ready = selected.size === need;
   return panel(`PROPOSE A TEAM OF ${need}`,
+    proposalCountdown(app),
     el('p', { class: 'fine' }, `Selected ${selected.size}/${need}.`),
     chips,
     el('div', { class: 'btn-row' },
@@ -539,6 +593,23 @@ function proposalPanel(app, intents) {
         onclick: () => ready && intents.propose([...selected]),
       }, '> CONFIRM TEAM'),
     ),
+  );
+}
+
+// Live countdown shown to everyone during the proposal phase when the host
+// enabled the proposal timer. Computed from a local deadline so it stays smooth
+// between state pushes; main.js drives a 1s repaint while this is on screen.
+function proposalCountdown(app) {
+  if (app.localProposalDeadline == null) return null;
+  const remMs = Math.max(0, app.localProposalDeadline - Date.now());
+  const totalSec = Math.ceil(remMs / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const label = `${m}:${String(s).padStart(2, '0')}`;
+  const urgent = totalSec <= 30;
+  return el('div', { class: 'proposal-timer' + (urgent ? ' urgent' : '') },
+    el('span', { class: 'timer-eyebrow' }, 'TIME LEFT'),
+    el('span', { class: 'timer-clock' }, label),
   );
 }
 
@@ -577,6 +648,12 @@ function votePanel(app, intents) {
     header.appendChild(el('p', { class: 'fine' }, `${votedCount}/${progress.length} votes in… You can change your mind.`));
   }
 
+  // Host option: surface WHO still owes a vote (never how anyone voted).
+  if (pub.showPendingVoters) {
+    const pending = pendingVotersBlock(pub);
+    if (pending) header.appendChild(pending);
+  }
+
   header.appendChild(el('div', { class: 'btn-row' },
     el('button', {
       class: 'btn btn-primary' + (approveSelected ? ' btn-selected' : ''),
@@ -588,6 +665,23 @@ function votePanel(app, intents) {
     }, '✗ REJECT'),
   ));
   return header;
+}
+
+// Names of online players who still owe a vote (host "Show pending voters"
+// option). Reveals only WHO is outstanding, never which way anyone voted.
+function pendingVotersBlock(pub) {
+  const progress = pub.voteProgress || [];
+  const nameById = new Map(pub.players.map(p => [p.id, p.name]));
+  const pending = progress.filter(x => !x.voted).map(x => nameById.get(x.id) || '—');
+  if (pending.length === 0) {
+    return el('p', { class: 'fine pending-done' }, 'All votes in — revealing…');
+  }
+  return el('div', { class: 'pending-voters' },
+    el('span', { class: 'pending-label' }, `WAITING ON ${pending.length}`),
+    el('div', { class: 'pending-names' },
+      ...pending.map(n => el('span', { class: 'pending-chip' }, n)),
+    ),
+  );
 }
 
 // --- Quest -----------------------------------------------------------------
@@ -622,23 +716,33 @@ function questPanel(app, intents) {
     );
   }
 
-  // The Lunatic is compelled to Fail — offer only that.
-  if (priv.mustFail) {
-    return panel('PLAY YOUR QUEST CARD',
-      el('p', { class: 'fine' }, 'As the Lunatic, you must play ', el('span', { class: 'accent' }, 'Fail'), '.'),
-      el('div', { class: 'btn-row' },
-        el('button', { class: 'btn btn-secondary btn-fail', onclick: () => intents.playCard(false) }, '✗ FAIL')),
-    );
-  }
-  const buttons = [el('button', { class: 'btn btn-primary', onclick: () => intents.playCard(true) }, '✓ SUCCESS')];
-  if (priv.mayFail) {
-    buttons.push(el('button', { class: 'btn btn-secondary btn-fail', onclick: () => intents.playCard(false) }, '✗ FAIL'));
-  }
+  // Everyone sees the SAME two options (Success + Fail) so a glance at another
+  // player's screen never reveals their allegiance. The engine still enforces
+  // the real rules — tapping a card you're not allowed to play shows a private
+  // nudge instead of submitting anything.
+  const successAllowed = !priv.mustFail;            // only the Lunatic can't succeed
+  const failAllowed = priv.mayFail || priv.mustFail; // evil (and the compelled Lunatic)
+
+  const notice = app.questNotice
+    ? el('p', { class: 'error-text', role: 'alert' },
+        app.questNotice === 'fail'
+          ? 'You cannot play Fail on this quest.'
+          : 'You cannot play Success on this quest.')
+    : null;
+
   return panel('PLAY YOUR QUEST CARD',
-    el('p', { class: 'fine' },
-      priv.mayFail ? 'You may help or sabotage.'
-                   : 'You must play Success on this quest.'),
-    el('div', { class: 'btn-row' }, ...buttons),
+    el('p', { class: 'fine' }, 'Play your card to decide the quest\'s fate.'),
+    notice,
+    el('div', { class: 'btn-row' },
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: successAllowed ? () => intents.playCard(true) : () => intents.questBlocked('success'),
+      }, '✓ SUCCESS'),
+      el('button', {
+        class: 'btn btn-secondary btn-fail',
+        onclick: failAllowed ? () => intents.playCard(false) : () => intents.questBlocked('fail'),
+      }, '✗ FAIL'),
+    ),
   );
 }
 

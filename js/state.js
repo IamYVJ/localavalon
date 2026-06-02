@@ -36,9 +36,14 @@ export class GameEngine {
     this.config = null;         // role config map { roleId: count }
     this.allowReveal = false;   // host option: let players re-check their role mid-game
     this.randomLeaderOrder = false; // host option: shuffle leader traversal order each game
+    this.questTimerEnabled = false; // host option: countdown for each team-proposal round
+    this.questTimerSeconds = 120;   // chosen duration, clamped to 60-300 (1-5 minutes)
+    this.proposalDeadline = null;   // absolute host-clock ms when the current proposal expires
+    this.showPendingVoters = false; // host option: reveal who still owes a vote during the team vote
     this.leaderIndex = 0;
     this.leaderOrder = null;    // null = sequential; array of seat indices = shuffled order
     this.leaderOrderPos = 0;    // current position within leaderOrder
+    this.firstLeaderId = null;  // id of the first Quest Leader (the Cleric learns their loyalty)
     this.questIndex = 0;        // 0-based current quest
     this.questResults = [null, null, null, null, null]; // 'success' | 'fail' | null
     this.rejectCount = 0;
@@ -139,6 +144,22 @@ export class GameEngine {
   /** Host toggle: when true, leader order is shuffled each game instead of sequential. */
   setRandomLeaderOrder(v) { this.randomLeaderOrder = !!v; }
 
+  /**
+   * Host toggle: a countdown for each team-proposal round. `seconds` is clamped
+   * to the 60-300 (1-5 minute) range. When enabled, every proposal phase starts
+   * a fresh deadline; if the leader doesn't confirm in time the host advances
+   * leadership (see proposalTimedOut).
+   */
+  setQuestTimer(enabled, seconds) {
+    this.questTimerEnabled = !!enabled;
+    if (typeof seconds === 'number' && isFinite(seconds)) {
+      this.questTimerSeconds = Math.min(300, Math.max(60, Math.round(seconds)));
+    }
+  }
+
+  /** Host toggle: surface the names of players who still owe a team vote. */
+  setShowPendingVoters(v) { this.showPendingVoters = !!v; }
+
   /** Convenience used by the UI when player count changes in the lobby. */
   ensureConfig() {
     if (!this.config && ROLE_COUNTS_OK(this.count)) {
@@ -170,6 +191,10 @@ export class GameEngine {
       this.leaderIndex = 0;
     }
 
+    // Snapshot who leads the first quest — the Cleric's reveal depends on it,
+    // so it must stay fixed even after leadership rotates.
+    this.firstLeaderId = this.players[this.leaderIndex] ? this.players[this.leaderIndex].id : null;
+
     this.phase = PHASES.ROLE_REVEAL;
     return { ok: true };
   }
@@ -191,6 +216,23 @@ export class GameEngine {
     this.votes = {};
     this.revealedVotes = null;
     this.questCards = {};
+    // Arm the per-proposal countdown (if the host enabled it).
+    this.proposalDeadline = this.questTimerEnabled
+      ? Date.now() + this.questTimerSeconds * 1000
+      : null;
+  }
+
+  /**
+   * Host-only: the proposal timer elapsed before the leader confirmed a team.
+   * Pass leadership to the next player and start a fresh proposal. This is
+   * deliberately NON-punitive — it does not count against the reject track, so
+   * a slow leader can't accidentally hand evil the game.
+   */
+  proposalTimedOut() {
+    if (this.phase !== PHASES.PROPOSAL) return { ok: false };
+    this._advanceLeader();
+    this._beginProposal();
+    return { ok: true };
   }
 
   /** Advance leadership to the next player (sequential or shuffled order). */
@@ -239,6 +281,7 @@ export class GameEngine {
     this.phase = PHASES.VOTE;
     this.votes = {};
     this.revealedVotes = null;
+    this.proposalDeadline = null; // team locked in — stop the countdown
     return { ok: true };
   }
 
@@ -299,8 +342,9 @@ export class GameEngine {
     if (id in this.questCards) return { ok: false, error: 'You already played a card.' };
 
     const player = this.getPlayer(id);
-    // Good players may only play Success. Enforce server-side too.
-    if (ROLES[player.roleId].team === 'good' && success === false) {
+    // Good players may only play Success — except the Good Lancelot, who is
+    // explicitly permitted to sabotage. Enforce server-side too.
+    if (ROLES[player.roleId].team === 'good' && success === false && player.roleId !== 'lancelotGood') {
       return { ok: false, error: 'Good players must play Success.' };
     }
     // Lunatic must always Fail; Brute may only Fail on quests 1-3.
@@ -385,12 +429,18 @@ export class GameEngine {
     const hostId = this.hostId;
     const allowReveal = this.allowReveal;
     const randomLeaderOrder = this.randomLeaderOrder;
+    const questTimerEnabled = this.questTimerEnabled;
+    const questTimerSeconds = this.questTimerSeconds;
+    const showPendingVoters = this.showPendingVoters;
     this.reset();
     this.players = players;
     this.config = config;
     this.hostId = hostId;
     this.allowReveal = allowReveal;
     this.randomLeaderOrder = randomLeaderOrder;
+    this.questTimerEnabled = questTimerEnabled;
+    this.questTimerSeconds = questTimerSeconds;
+    this.showPendingVoters = showPendingVoters;
   }
 
   // -------------------------------------------------------------------------
@@ -405,9 +455,14 @@ export class GameEngine {
       config: this.config,
       allowReveal: this.allowReveal,
       randomLeaderOrder: this.randomLeaderOrder,
+      questTimerEnabled: this.questTimerEnabled,
+      questTimerSeconds: this.questTimerSeconds,
+      proposalDeadline: this.proposalDeadline,
+      showPendingVoters: this.showPendingVoters,
       leaderIndex: this.leaderIndex,
       leaderOrder: this.leaderOrder,
       leaderOrderPos: this.leaderOrderPos,
+      firstLeaderId: this.firstLeaderId,
       questIndex: this.questIndex,
       questResults: this.questResults,
       rejectCount: this.rejectCount,
@@ -435,9 +490,14 @@ export class GameEngine {
       config: s.config ?? null,
       allowReveal: !!s.allowReveal,
       randomLeaderOrder: !!s.randomLeaderOrder,
+      questTimerEnabled: !!s.questTimerEnabled,
+      questTimerSeconds: s.questTimerSeconds ?? 120,
+      proposalDeadline: s.proposalDeadline ?? null,
+      showPendingVoters: !!s.showPendingVoters,
       leaderIndex: s.leaderIndex ?? 0,
       leaderOrder: s.leaderOrder ?? null,
       leaderOrderPos: s.leaderOrderPos ?? 0,
+      firstLeaderId: s.firstLeaderId ?? null,
       questIndex: s.questIndex ?? 0,
       questResults: s.questResults ?? [null, null, null, null, null],
       rejectCount: s.rejectCount ?? 0,
@@ -455,6 +515,12 @@ export class GameEngine {
     });
     // Everyone is offline until their connection re-establishes after reload.
     this.players.forEach(p => { p.online = (p.id === this.hostId); });
+    // A host reload landing mid-proposal would otherwise restore a deadline that
+    // may already be in the past (firing the timeout instantly). Give the leader
+    // a fresh window instead.
+    if (this.phase === PHASES.PROPOSAL && this.questTimerEnabled) {
+      this.proposalDeadline = Date.now() + this.questTimerSeconds * 1000;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -497,6 +563,14 @@ export class GameEngine {
       lastQuestResult: (this._questResolved) ? this.questResults[this.questIndex] : null,
       config: this.config,
       allowReveal: this.allowReveal,
+      questTimerEnabled: this.questTimerEnabled,
+      questTimerSeconds: this.questTimerSeconds,
+      // Remaining time on the current proposal, as a relative span so clients
+      // can render a synced countdown without depending on host clock alignment.
+      proposalRemainingMs: (this.phase === PHASES.PROPOSAL && this.proposalDeadline != null)
+        ? Math.max(0, this.proposalDeadline - Date.now())
+        : null,
+      showPendingVoters: this.showPendingVoters,
       readyCount: this.players.filter(p => p.ready).length,
       playerCount: this.players.length,
     };
@@ -525,7 +599,8 @@ export class GameEngine {
       priv.role = { id: role.id, name: role.name, team: role.team, blurb: role.blurb };
       priv.knowledge = computeKnowledge(
         { id: p.id, name: p.name, roleId: p.roleId },
-        this.players.map(x => ({ id: x.id, name: x.name, roleId: x.roleId }))
+        this.players.map(x => ({ id: x.id, name: x.name, roleId: x.roleId })),
+        { firstLeaderId: this.firstLeaderId }
       );
     }
 
@@ -538,9 +613,10 @@ export class GameEngine {
       priv.onQuest = this.proposal.members.includes(id);
       priv.hasPlayedCard = id in this.questCards;
       const isEvil = p.roleId && ROLES[p.roleId].team === 'evil';
-      // Lunatic is compelled to Fail; Brute can't Fail on quests 4-5.
+      // Lunatic is compelled to Fail; Brute can't Fail on quests 4-5; the Good
+      // Lancelot is a Good player who is nonetheless allowed to Fail.
       priv.mustFail = priv.onQuest && p.roleId === 'lunatic';
-      let mayFail = priv.onQuest && isEvil;
+      let mayFail = priv.onQuest && (isEvil || p.roleId === 'lancelotGood');
       if (p.roleId === 'brute' && this.questIndex >= 3) mayFail = false;
       priv.mayFail = mayFail;
     }

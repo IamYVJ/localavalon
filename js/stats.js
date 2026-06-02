@@ -25,7 +25,9 @@ const CURRENT_VERSION = 1;
 // All trackable role IDs.
 const ALL_ROLES = [
   'merlin', 'percival', 'servant', 'tristan', 'isolde',
+  'cleric', 'untrustworthy', 'lancelotGood',
   'assassin', 'morgana', 'mordred', 'oberon', 'lunatic', 'brute', 'minion',
+  'lancelotEvil',
 ];
 
 function storageKey(roomCode) {

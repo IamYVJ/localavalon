@@ -9,7 +9,7 @@
 // ============================================================================
 
 import { GameEngine } from './state.js';
-import { createHost, joinHost, createDiscovery, describePeerError, peerIdForCode } from './net.js';
+import { createHost, joinHost, createDiscovery, describePeerError, isRecoverableError, peerIdForCode } from './net.js';
 import { render } from './ui.js';
 import { ROLE_COUNTS, ROLES, OPTIONAL_TOGGLES } from './rules.js';
 import {
@@ -38,6 +38,10 @@ const app = {
   // Host game options.
   allowReveal: false,
   randomLeaderOrder: false,
+  questTimerEnabled: false,       // per-proposal countdown on/off
+  questTimerSeconds: 120,         // chosen duration in seconds (60-300)
+  localProposalDeadline: null,    // Date.now()-based deadline used to render the countdown
+  showPendingVoters: false,       // reveal who still owes a team vote
   _lastProposalKey: null,
   // Local-network game discovery (Join screen).
   discovered: [],            // [{ code, hostName, playerCount, phase, joinable }]
@@ -45,6 +49,10 @@ const app = {
   // Statistics / leaderboard state.
   statsData: null,           // { summary, leaderboard } from getLeaderboard()
   _gameRecorded: false,      // prevents double-recording the same game
+  questNotice: null,         // transient nudge when a player taps a card they can't play
+  netStatus: 'online',       // 'online' | 'reconnecting' — drives the reconnect banner
+  _reconnectAttempts: 0,
+  _netEverOnline: false,     // true once the peer has opened — gates recoverable-error handling
 };
 
 // Host-only runtime.
@@ -52,10 +60,17 @@ let engine = null;
 let net = null;            // host or client handle
 let voteTimer = null;
 let questTimer = null;
+let proposalTimer = null;     // host-only: fires when the team-proposal countdown expires
+
+// Drives the visible per-second countdown on every device during the proposal phase.
+let countdownInterval = null;
 
 // Client-only: background peer used to discover games on the Join screen.
 let discovery = null;
 let discoveryTimer = null;
+
+// Client-only: retry loop that revives a dropped connection mid-game.
+let clientReconnectTimer = null;
 
 // ---------------------------------------------------------------------------
 // Render wrapper — keeps a little local UI bookkeeping in sync first.
@@ -67,11 +82,34 @@ function draw() {
     if (key !== app._lastProposalKey) {
       app._lastProposalKey = key;
       app.selectedTeam = [];
+      // Translate the host's relative span into a local deadline once per
+      // proposal, so the countdown stays in sync regardless of clock skew and
+      // keeps ticking between (infrequent) state pushes.
+      app.localProposalDeadline = (app.pub.proposalRemainingMs != null)
+        ? Date.now() + app.pub.proposalRemainingMs
+        : null;
     }
   } else {
     app._lastProposalKey = null;
+    app.localProposalDeadline = null;
   }
+  // The quest-card nudge is transient: clear it whenever we leave the quest phase.
+  if (!app.pub || app.pub.phase !== 'quest') app.questNotice = null;
+  manageCountdownTicker();
   render(root, app, intents);
+}
+
+// Keep a 1s repaint running only while a proposal countdown is on screen, so the
+// displayed time decrements smoothly without flooding renders the rest of the time.
+function manageCountdownTicker() {
+  const active = app.screen === 'game' && app.pub
+    && app.pub.phase === 'proposal' && app.localProposalDeadline != null;
+  if (active && !countdownInterval) {
+    countdownInterval = setInterval(() => render(root, app, intents), 1000);
+  } else if (!active && countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +176,18 @@ function hostSync() {
 
 // Auto-advance the vote and quest reveal beats after a short display delay.
 function scheduleAdvances() {
+  // The proposal countdown only lives during the proposal phase — drop any
+  // pending timer the moment we leave it (team confirmed, reject, game over…).
+  if (app.pub.phase !== 'proposal' && proposalTimer) {
+    clearTimeout(proposalTimer); proposalTimer = null;
+  }
+  if (app.pub.phase === 'proposal' && app.pub.proposalRemainingMs != null && !proposalTimer) {
+    proposalTimer = setTimeout(() => {
+      proposalTimer = null;
+      engine.proposalTimedOut();
+      hostSync();
+    }, app.pub.proposalRemainingMs);
+  }
   if (app.pub.phase === 'vote' && app.pub.voteResolved && !voteTimer) {
     voteTimer = setTimeout(() => {
       voteTimer = null;
@@ -214,12 +264,27 @@ function hostHandlers() {
     // show the host's name + player count before anyone commits to joining.
     onConnect: (connId) => { net.sendTo(connId, { type: 'lobbyInfo', info: lobbyInfo() }); },
     onData:    (connId, msg) => handleIntent(connId, msg),
+    onNetStatus: (status) => {
+      app.netStatus = status;
+      if (status === 'online') app._netEverOnline = true;
+      draw();
+    },
     onDisconnect: (connId) => {
       engine.markOffline(connId);
       if (engine.phase === 'lobby') rebuildConfig();
       hostSync();
     },
     onError: (err) => {
+      // A transient broker hiccup while a game is live: stay put, show the
+      // reconnect banner, and let the auto-reconnect bring the link back. Only
+      // once we've connected at least once — a cold-start failure (no internet)
+      // should still surface as a clear error rather than an endless banner.
+      if (engine && app._netEverOnline && isRecoverableError(err)) {
+        app.netStatus = 'reconnecting';
+        try { net && net.reconnect(); } catch (_) {}
+        draw();
+        return;
+      }
       app.screen = 'error';
       app.error = describePeerError(err);
       draw();
@@ -241,6 +306,8 @@ function startHosting() {
   engine.addPlayer(app.me.id, name, { isHost: true });
   engine.setAllowReveal(app.allowReveal);
   engine.setRandomLeaderOrder(app.randomLeaderOrder);
+  engine.setQuestTimer(app.questTimerEnabled, app.questTimerSeconds);
+  engine.setShowPendingVoters(app.showPendingVoters);
   rebuildConfig();
 
   saveSession({ mode: 'host', code, name });
@@ -268,6 +335,12 @@ function resumeHosting(code, snapshot, name) {
   if (hostPlayer) hostPlayer.online = true;
   app.allowReveal = !!engine.allowReveal;
   app.randomLeaderOrder = !!engine.randomLeaderOrder;
+  app.questTimerEnabled = !!engine.questTimerEnabled;
+  app.questTimerSeconds = engine.questTimerSeconds;
+  app.showPendingVoters = !!engine.showPendingVoters;
+  // If we reload on the game-over screen, the game was already recorded before
+  // the reload — don't let the resume re-record (and inflate) the same result.
+  if (engine.phase === 'gameover') app._gameRecorded = true;
   // Mirror the restored role config back into the lobby toggles so the editor
   // stays consistent if the game was reloaded while still in the lobby.
   const cfg = engine.config || {};
@@ -302,7 +375,10 @@ function startJoining(rawCode, rawName) {
 
   net = joinHost(code, {
     onOpen: () => net.send({ type: 'join', name }),
+    onNetStatus: (status) => { app.netStatus = status; draw(); },
     onData: (msg) => {
+      // Any message means the link is live again — cancel a pending retry loop.
+      stopClientReconnect();
       switch (msg.type) {
         case 'welcome':  app.me.id = msg.playerId; break;
         case 'state':    app.pub = msg.pub; app.priv = msg.priv; if (app.screen !== 'stats') app.screen = 'game'; draw(); break;
@@ -313,13 +389,18 @@ function startJoining(rawCode, rawName) {
       }
     },
     onClose: () => {
-      // Host went away. If we were in a game, say so; otherwise it's a failed join.
-      if (app.screen === 'game') { app.screen = 'hostleft'; }
-      else { app.screen = 'error'; app.error = 'The host closed the connection.'; }
-      draw();
+      if (!net) return;                 // we tore the connection down ourselves
+      // The data channel dropped. If we had a live game, the host may just be
+      // briefly away (locked phone, tab switch) — retry before giving up.
+      if (app.pub) { startClientReconnect(); }
+      else { app.screen = 'error'; app.error = 'The host closed the connection.'; draw(); }
     },
     onError: (err) => {
-      if (!net || !net.isOpen()) {
+      if (!net) return;                 // torn down deliberately
+      // Mid-game: assume the host is briefly away and keep retrying until the
+      // attempt cap, rather than dropping straight to a fatal error screen.
+      if (app.pub && app.screen !== 'hostleft') { startClientReconnect(); return; }
+      if (!net.isOpen()) {
         app.screen = 'error';
         app.error = describePeerError(err);
         draw();
@@ -387,9 +468,62 @@ function stopDiscovery() {
 function teardownNet() {
   try { if (net) net.destroy(); } catch (_) {}
   net = null;
+  stopClientReconnect();
   if (voteTimer) { clearTimeout(voteTimer); voteTimer = null; }
   if (questTimer) { clearTimeout(questTimer); questTimer = null; }
+  if (proposalTimer) { clearTimeout(proposalTimer); proposalTimer = null; }
+  if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
 }
+
+// ---------------------------------------------------------------------------
+// Connection recovery. The host's broker socket dies whenever the device sleeps
+// or the tab is backgrounded; net.js auto-reconnects it. A CLIENT additionally
+// needs to re-open its data channel and re-join (the engine reclaims the seat by
+// name). We retry on a backoff and only declare the host gone after persistent
+// failure, so a host briefly leaving the screen no longer kills the game.
+// ---------------------------------------------------------------------------
+const RECONNECT_INTERVAL_MS = 3000;
+const RECONNECT_MAX_ATTEMPTS = 12;   // ~36s before we give up
+
+function startClientReconnect() {
+  if (app.screen === 'hostleft') return;  // already gave up; wait for user action
+  app.netStatus = 'reconnecting';
+  if (clientReconnectTimer) return;   // a loop is already running
+  app._reconnectAttempts = 0;
+  const tick = () => {
+    clientReconnectTimer = null;
+    if (!net || app.me.isHost) { app.netStatus = 'online'; return; }
+    if (net.isOpen()) { stopClientReconnect(); draw(); return; }
+    if (app._reconnectAttempts++ >= RECONNECT_MAX_ATTEMPTS) {
+      stopClientReconnect();
+      app.screen = 'hostleft';
+      draw();
+      return;
+    }
+    try { net.reconnect && net.reconnect(); } catch (_) {}
+    draw();
+    clientReconnectTimer = setTimeout(tick, RECONNECT_INTERVAL_MS);
+  };
+  tick();
+}
+
+function stopClientReconnect() {
+  if (clientReconnectTimer) { clearTimeout(clientReconnectTimer); clientReconnectTimer = null; }
+  app._reconnectAttempts = 0;
+  app.netStatus = 'online';
+}
+
+// Nudge the live connection back to life when we return to the foreground or the
+// network comes back — covers the common "host locked their phone" case.
+function wakeConnection() {
+  if (!net) return;
+  try { net.reconnect && net.reconnect(); } catch (_) {}
+  if (!app.me.isHost && app.pub && !net.isOpen()) startClientReconnect();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') wakeConnection();
+});
+window.addEventListener('online', wakeConnection);
 
 // ---------------------------------------------------------------------------
 // Intents handed to the view. Host intents go straight through the engine;
@@ -411,6 +545,7 @@ const intents = {
     app.screen = 'home';
     app.pub = null; app.priv = null; app.error = '';
     app.me.isHost = false; app.me.id = null;
+    app.netStatus = 'online'; app._netEverOnline = false;
     draw();
   },
 
@@ -441,6 +576,25 @@ const intents = {
     if (!app.me.isHost || !engine) return;
     app.randomLeaderOrder = !app.randomLeaderOrder;
     engine.setRandomLeaderOrder(app.randomLeaderOrder);
+    hostSync();
+  },
+  toggleQuestTimer: () => {
+    if (!app.me.isHost || !engine) return;
+    app.questTimerEnabled = !app.questTimerEnabled;
+    engine.setQuestTimer(app.questTimerEnabled, app.questTimerSeconds);
+    hostSync();
+  },
+  setQuestTimerMinutes: (min) => {
+    if (!app.me.isHost || !engine) return;
+    const seconds = Math.min(300, Math.max(60, Math.round(min * 60)));
+    app.questTimerSeconds = seconds;
+    engine.setQuestTimer(app.questTimerEnabled, seconds);
+    hostSync();
+  },
+  toggleShowPendingVoters: () => {
+    if (!app.me.isHost || !engine) return;
+    app.showPendingVoters = !app.showPendingVoters;
+    engine.setShowPendingVoters(app.showPendingVoters);
     hostSync();
   },
   startGame: () => {
@@ -489,7 +643,9 @@ const intents = {
   },
   propose: (members) => sendIntent({ type: 'propose', members }),
   vote: (approve) => sendIntent({ type: 'vote', approve }),
-  playCard: (success) => sendIntent({ type: 'card', success }),
+  playCard: (success) => { app.questNotice = null; sendIntent({ type: 'card', success }); },
+  // Player tapped a quest card they aren't allowed to play — nudge, don't submit.
+  questBlocked: (kind) => { app.questNotice = kind; draw(); },
   assassinate: (targetId) => sendIntent({ type: 'assassinate', targetId }),
 };
 
@@ -518,8 +674,27 @@ function resumeSession() {
 if (!resumeSession()) draw();
 
 // Service worker (relative path so it works under a GitHub Pages subpath).
+// Goal: never serve a stale build, but only ever auto-reload when there is an
+// actual new version — not on every load.
 if ('serviceWorker' in navigator) {
+  // If a worker already controls this page at load, a later controller change
+  // means a NEW version just activated — reload ONCE to pick it up. On the very
+  // first visit there is no prior controller, so initial activation does NOT
+  // reload (avoids a needless refresh).
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return;
+    reloading = true;
+    window.location.reload();
+  });
+
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(() => { /* offline shell optional */ });
+    // updateViaCache:'none' forces the browser to fetch sw.js fresh (not from
+    // the HTTP cache) so new deploys are detected promptly; reg.update() kicks
+    // off that check immediately on load.
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      .then((reg) => { reg.update().catch(() => {}); })
+      .catch(() => { /* offline shell is optional */ });
   });
 }

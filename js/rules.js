@@ -65,6 +65,12 @@ export const ROLES = {
               blurb: 'One of the Lovers — sees Isolde, who is also Good.' },
   isolde:   { id: 'isolde',   name: 'Isolde',                    team: 'good', optional: true,  unique: true,
               blurb: 'One of the Lovers — sees Tristan, who is also Good.' },
+  cleric:   { id: 'cleric',   name: 'Cleric',                    team: 'good', optional: true,  unique: true,
+              blurb: 'At game start, secretly learns whether the FIRST Quest Leader is Good or Evil.' },
+  untrustworthy: { id: 'untrustworthy', name: 'Untrustworthy Servant', team: 'good', optional: true, unique: true,
+              blurb: 'Loyal to Arthur — but appears as Evil to Merlin, muddying his vision.' },
+  lancelotGood: { id: 'lancelotGood', name: 'Lancelot (Good)',   team: 'good', optional: true,  unique: true,
+              blurb: 'A Good knight who is nonetheless permitted to play Fail on quests.' },
 
   assassin: { id: 'assassin', name: 'Assassin',                  team: 'evil', optional: false, unique: true,
               blurb: 'If Good wins 3 quests, name Merlin to steal victory for Evil.' },
@@ -80,6 +86,8 @@ export const ROLES = {
               blurb: 'May only play Fail on the first three quests.' },
   minion:   { id: 'minion',   name: 'Minion of Mordred',         team: 'evil', optional: true,  unique: false,
               blurb: 'Knows the other Evil (except Oberon).' },
+  lancelotEvil: { id: 'lancelotEvil', name: 'Lancelot (Evil)',   team: 'evil', optional: true,  unique: true,
+              blurb: 'An Evil knight who knows the other Evil players.' },
 };
 
 // ---------------------------------------------------------------------------
@@ -90,6 +98,9 @@ export const ROLES = {
 export const OPTIONAL_TOGGLES = [
   { key: 'percival', roleIds: ['percival'],            team: 'good', label: 'Percival',          blurb: ROLES.percival.blurb },
   { key: 'lovers',   roleIds: ['tristan', 'isolde'],   team: 'good', label: 'Tristan & Isolde',  blurb: 'The Lovers — each sees the other, and knows that person is Good.' },
+  { key: 'cleric',   roleIds: ['cleric'],              team: 'good', label: 'Cleric',            blurb: ROLES.cleric.blurb },
+  { key: 'untrustworthy', roleIds: ['untrustworthy'],  team: 'good', label: 'Untrustworthy Servant', blurb: ROLES.untrustworthy.blurb },
+  { key: 'lancelots', roleIds: ['lancelotGood', 'lancelotEvil'], team: 'good', label: 'Lancelots', blurb: 'Adds a Good and an Evil knight — the Good Lancelot is allowed to play Fail cards.' },
   { key: 'morgana',  roleIds: ['morgana'],             team: 'evil', label: 'Morgana',           blurb: ROLES.morgana.blurb },
   { key: 'mordred',  roleIds: ['mordred'],             team: 'evil', label: 'Mordred',           blurb: ROLES.mordred.blurb },
   { key: 'oberon',   roleIds: ['oberon'],              team: 'evil', label: 'Oberon',            blurb: ROLES.oberon.blurb },
@@ -165,6 +176,7 @@ export function validateRoleConfig(cfg, playerCount) {
   if (!cfg.assassin) errors.push('Assassin is required.');
   if (cfg.percival && !cfg.morgana) errors.push('Percival should be paired with Morgana, or he sees no decoy.');
   if (!!cfg.tristan !== !!cfg.isolde) errors.push('Tristan and Isolde must both be in the game.');
+  if (!!cfg.lancelotGood !== !!cfg.lancelotEvil) errors.push('Both Lancelots (Good and Evil) must be in the game together.');
 
   if (good !== target.good) errors.push(`Good must total ${target.good} (currently ${good}).`);
   if (evil !== target.evil) errors.push(`Evil must total ${target.evil} (currently ${evil}).`);
@@ -200,7 +212,7 @@ export function shuffle(arr, rng = Math.random) {
 // Returns { team, seesLabel, sees:[{id,name}], note } describing the private
 // reveal. Never leak more than the role is entitled to.
 // ---------------------------------------------------------------------------
-export function computeKnowledge(player, players) {
+export function computeKnowledge(player, players, opts = {}) {
   const role = ROLES[player.roleId];
   const team = role.team;
   const others = players.filter(p => p.id !== player.id);
@@ -209,11 +221,36 @@ export function computeKnowledge(player, players) {
   const evilOf = (p) => !!ROLES[p.roleId] && ROLES[p.roleId].team === 'evil';
 
   if (player.roleId === 'merlin') {
-    // Sees all Evil except Mordred (Oberon IS visible to Merlin).
-    const sees = others.filter(p => evilOf(p) && p.roleId !== 'mordred')
+    // Sees all Evil except Mordred (Oberon IS visible to Merlin). The
+    // Untrustworthy Servant is Good but ALSO appears here, as a false positive.
+    const sees = others.filter(p =>
+        (evilOf(p) && p.roleId !== 'mordred') || p.roleId === 'untrustworthy')
                         .map(p => ({ id: p.id, name: p.name }));
     return { team, seesLabel: 'Evil players (Mordred hidden)', sees,
              note: 'Win quietly — the Assassin is hunting you.' };
+  }
+
+  if (player.roleId === 'cleric') {
+    // Learns ONLY the loyalty (not the role) of whoever leads the first quest.
+    const leader = players.find(p => p.id === opts.firstLeaderId);
+    if (!leader) {
+      return { team, seesLabel: 'The first Quest Leader\'s loyalty', sees: [],
+               note: 'You will learn the first Leader\'s loyalty when the game begins.' };
+    }
+    const leaderEvil = !!ROLES[leader.roleId] && ROLES[leader.roleId].team === 'evil';
+    return { team, seesLabel: `The first Quest Leader is ${leaderEvil ? 'EVIL' : 'GOOD'}`,
+             sees: [{ id: leader.id, name: leader.name }],
+             note: 'You know only their loyalty — not their role.' };
+  }
+
+  if (player.roleId === 'untrustworthy') {
+    return { team, seesLabel: 'You appear as EVIL to Merlin', sees: [],
+             note: 'You are loyal to Arthur, yet Merlin counts you among the Evil.' };
+  }
+
+  if (player.roleId === 'lancelotGood') {
+    return { team, seesLabel: 'You may play Fail', sees: [],
+             note: 'A Good knight — but you are permitted to sabotage quests.' };
   }
 
   if (player.roleId === 'percival') {

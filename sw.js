@@ -12,7 +12,7 @@
 // ============================================================================
 
 // Bump this version to invalidate old caches on the next activate.
-const CACHE = 'localavalon-v6';
+const CACHE = 'localavalon-v15';
 
 // Core app shell (same-origin). Relative to the SW's scope.
 const SHELL = [
@@ -64,17 +64,24 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
+  const sameOrigin = url.origin === self.location.origin;
 
-  // SPA navigations: serve the cached shell so deep loads work offline.
+  // SPA navigations: network-first so the freshest HTML wins, cached shell as
+  // an offline fallback.
   if (req.mode === 'navigate') {
-    event.respondWith((async () => {
-      try {
-        return await fetch(req);
-      } catch (_) {
-        const cache = await caches.open(CACHE);
-        return (await cache.match('./index.html')) || (await cache.match('./')) || Response.error();
-      }
-    })());
+    event.respondWith(networkFirst(req, './index.html'));
+    return;
+  }
+
+  // App CODE (our own HTML/JS/CSS) is network-first: when online, always run the
+  // latest build — this is what prevents users getting stuck on a stale version
+  // even if the cache version wasn't bumped. Falls back to cache when offline.
+  const isAppCode = sameOrigin && (
+    req.destination === 'script' || req.destination === 'style' || req.destination === 'document' ||
+    /\.(?:js|css|html)$/.test(url.pathname)
+  );
+  if (isAppCode) {
+    event.respondWith(networkFirst(req));
     return;
   }
 
@@ -82,8 +89,9 @@ self.addEventListener('fetch', (event) => {
     url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com';
   const isCDN = url.hostname === 'unpkg.com';
 
-  // Cache-first for shell, fonts, and the pinned CDN lib.
-  if (url.origin === self.location.origin || isFont || isCDN) {
+  // Everything else — icons, manifest, fonts, the version-pinned PeerJS lib — is
+  // immutable-ish, so cache-first for instant loads.
+  if (sameOrigin || isFont || isCDN) {
     event.respondWith((async () => {
       const cache = await caches.open(CACHE);
       const cached = await cache.match(req, { ignoreSearch: false });
@@ -100,3 +108,21 @@ self.addEventListener('fetch', (event) => {
   }
   // Everything else (e.g. signaling/WebRTC) falls through to the network.
 });
+
+// Network-first: try the network, refresh the cache on success, fall back to
+// the cache (and optionally a named fallback) when the network is unavailable.
+async function networkFirst(req, fallbackKey) {
+  const cache = await caches.open(CACHE);
+  try {
+    const res = await fetch(req);
+    if (res && res.ok) cache.put(req, res.clone());
+    return res;
+  } catch (_) {
+    const cached = await cache.match(req, { ignoreSearch: false });
+    if (cached) return cached;
+    if (fallbackKey) {
+      return (await cache.match(fallbackKey)) || (await cache.match('./')) || Response.error();
+    }
+    return Response.error();
+  }
+}

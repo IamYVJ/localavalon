@@ -55,7 +55,18 @@ export function createHost(code, handlers = {}) {
   const peer = newPeer(peerIdForCode(code));
   const connections = new Map(); // connId -> DataConnection
 
-  peer.on('open', () => handlers.onOpen && handlers.onOpen(code));
+  peer.on('open', () => {
+    handlers.onNetStatus && handlers.onNetStatus('online');
+    handlers.onOpen && handlers.onOpen(code);
+  });
+
+  // The broker socket dropped (very common when a phone locks or the tab is
+  // backgrounded). PeerJS does NOT auto-reconnect, so we must — reusing the
+  // SAME room-code id keeps existing joiners reachable and lets new ones in.
+  peer.on('disconnected', () => {
+    handlers.onNetStatus && handlers.onNetStatus('reconnecting');
+    if (!peer.destroyed) { try { peer.reconnect(); } catch (_) {} }
+  });
 
   peer.on('connection', (conn) => {
     conn.on('open', () => {
@@ -90,6 +101,10 @@ export function createHost(code, handlers = {}) {
         if (conn.open) trySend(conn, msg);
       }
     },
+    // Re-establish the broker socket after a background/sleep, reusing the id.
+    reconnect() {
+      if (!peer.destroyed && peer.disconnected) { try { peer.reconnect(); } catch (_) {} }
+    },
     destroy() { try { peer.destroy(); } catch (_) {} },
   };
 }
@@ -101,7 +116,9 @@ export function joinHost(code, handlers = {}) {
   const peer = newPeer(null);
   let conn = null;
 
-  peer.on('open', () => {
+  // (Re)open the single data connection to the host. Safe to call repeatedly —
+  // a reconnecting client re-runs this, and the host reclaims its seat by name.
+  const openConn = () => {
     conn = peer.connect(peerIdForCode(code), { reliable: true });
 
     conn.on('open', () => handlers.onOpen && handlers.onOpen(conn));
@@ -111,6 +128,18 @@ export function joinHost(code, handlers = {}) {
     });
     conn.on('close', () => handlers.onClose && handlers.onClose());
     conn.on('error', (err) => handlers.onError && handlers.onError(err));
+  };
+
+  peer.on('open', () => {
+    handlers.onNetStatus && handlers.onNetStatus('online');
+    openConn();
+  });
+
+  // Broker socket dropped (background/sleep). Reconnect with the same peer —
+  // its 'open' will fire again and re-open the data connection automatically.
+  peer.on('disconnected', () => {
+    handlers.onNetStatus && handlers.onNetStatus('reconnecting');
+    if (!peer.destroyed) { try { peer.reconnect(); } catch (_) {} }
   });
 
   // A peer-level error firing before the connection opens almost always means
@@ -121,6 +150,13 @@ export function joinHost(code, handlers = {}) {
     peer,
     send(msg) { if (conn && conn.open) trySend(conn, msg); },
     isOpen() { return !!(conn && conn.open); },
+    // Recover after a background/sleep: revive the broker socket if it dropped,
+    // otherwise just re-open the data channel if the host went away and returned.
+    reconnect() {
+      if (peer.destroyed) return;
+      if (peer.disconnected) { try { peer.reconnect(); } catch (_) {} return; }
+      if (!conn || !conn.open) openConn();
+    },
     destroy() { try { peer.destroy(); } catch (_) {} },
   };
 }
@@ -217,6 +253,14 @@ function safeParse(raw) {
 // ---------------------------------------------------------------------------
 // Human-readable mapping for the common PeerJS error types, surfaced in the UI.
 // ---------------------------------------------------------------------------
+// True for transient connection errors we can recover from by reconnecting,
+// rather than fatal ones (bad code, incompatible browser, taken id).
+export function isRecoverableError(err) {
+  const t = err && err.type;
+  return t === 'network' || t === 'server-error'
+      || t === 'socket-error' || t === 'socket-closed' || t === 'disconnected';
+}
+
 export function describePeerError(err) {
   const type = err && err.type;
   switch (type) {

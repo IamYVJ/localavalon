@@ -307,5 +307,172 @@ ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3
   eq(e.privateStateFor('newconn-xyz').hasVoted, true, 'reconnected player still counted as voted');
 }
 
+// --- Cleric: learns the first Quest Leader's loyalty ----------------------
+{
+  const players = [
+    { id: 'a', name: 'A', roleId: 'cleric' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'merlin' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  // First leader is the Assassin (evil).
+  const evilLeader = computeKnowledge(players[0], players, { firstLeaderId: 'b' });
+  eq(evilLeader.sees.map(s => s.id), ['b'], 'Cleric sees the first leader');
+  ok(/EVIL/.test(evilLeader.seesLabel), 'Cleric told first leader is EVIL');
+  // First leader is a Servant (good).
+  const goodLeader = computeKnowledge(players[0], players, { firstLeaderId: 'd' });
+  ok(/GOOD/.test(goodLeader.seesLabel), 'Cleric told first leader is GOOD');
+  // No leader info yet -> graceful fallback, no leak.
+  eq(computeKnowledge(players[0], players).sees, [], 'Cleric without leader info sees nobody');
+
+  // End-to-end: startGame fixes firstLeaderId and the Cleric's reveal matches.
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, cleric: 1, servant: 1, minion: 1 });
+  ok(e.startGame().ok, 'startGame with Cleric ok');
+  ok(e.firstLeaderId === e.players[e.leaderIndex].id, 'firstLeaderId captured at start');
+  const cleric = e.players.find(p => p.roleId === 'cleric');
+  const leaderRole = ROLES[e.getPlayer(e.firstLeaderId).roleId].team;
+  const reveal = e.privateStateFor(cleric.id).knowledge;
+  ok(reveal.seesLabel.includes(leaderRole === 'evil' ? 'EVIL' : 'GOOD'),
+     'Cleric private reveal matches first leader loyalty');
+  // firstLeaderId survives serialize/restore.
+  const r = new GameEngine(); r.restore(e.serialize());
+  eq(r.firstLeaderId, e.firstLeaderId, 'firstLeaderId survives restore');
+}
+
+// --- Untrustworthy Servant: Good, but appears Evil to Merlin ---------------
+{
+  const players = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'untrustworthy' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  const merlinSees = computeKnowledge(players[0], players).sees.map(s => s.id).sort();
+  eq(merlinSees, ['b', 'c'], 'Merlin sees Assassin AND the Untrustworthy Servant');
+  eq(ROLES.untrustworthy.team, 'good', 'Untrustworthy Servant is on the Good team');
+  // The assassin (evil) does NOT see the Untrustworthy Servant as a teammate.
+  ok(!computeKnowledge(players[1], players).sees.map(s => s.id).includes('c'),
+     'Evil does not see the Untrustworthy Servant');
+}
+
+// --- Lancelots: Good Lancelot may Fail; must be paired ---------------------
+{
+  ok(!validateRoleConfig({ merlin: 1, assassin: 1, lancelotGood: 1, servant: 1, minion: 1 }, 5).ok,
+     'Good Lancelot without Evil Lancelot rejected');
+  ok(validateRoleConfig({ merlin: 1, assassin: 1, lancelotGood: 1, lancelotEvil: 1, servant: 2, minion: 1 }, 7).ok,
+     'Paired Lancelots config valid for 7p');
+
+  const e = new GameEngine();
+  seat(e, ['A', 'B', 'C', 'D', 'E']);
+  e.phase = PHASES.QUEST;
+  e.players[0].roleId = 'lancelotGood';
+  e.players[1].roleId = 'servant';
+  e.players[2].roleId = 'merlin';
+  e.players[3].roleId = 'lancelotEvil';
+  e.players[4].roleId = 'assassin';
+  e.questIndex = 0;
+  e.proposal = { leaderId: 'p0', members: ['p0', 'p1'] };
+  e.questCards = {};
+  ok(e.playQuestCard('p0', false).ok, 'Good Lancelot may play Fail');
+  ok(!e.playQuestCard('p1', false).ok, 'A plain Good Servant still cannot Fail');
+  eq(e.privateStateFor('p0').mayFail, true, 'Good Lancelot mayFail flag set');
+}
+
+// --- Proposal timer (host option) -----------------------------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+
+  // Off by default; clamps the chosen duration to the 1-5 minute window.
+  ok(!e.questTimerEnabled, 'timer off by default');
+  e.setQuestTimer(true, 30);   eq(e.questTimerSeconds, 60,  'clamps below 1 min up to 60s');
+  e.setQuestTimer(true, 600);  eq(e.questTimerSeconds, 300, 'clamps above 5 min down to 300s');
+  e.setQuestTimer(true, 180);  eq(e.questTimerSeconds, 180, 'accepts an in-range duration');
+
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  eq(e.phase, PHASES.PROPOSAL, 'reached proposal');
+
+  // Entering proposal arms a deadline; publicState exposes a positive remaining span.
+  ok(e.proposalDeadline != null, 'proposal arms a deadline when timer enabled');
+  const rem = e.publicState().proposalRemainingMs;
+  ok(rem != null && rem > 0 && rem <= 180000, `remaining span within bounds (got ${rem})`);
+
+  // Timing out passes leadership WITHOUT touching the reject track.
+  const beforeLeader = e.leader.id;
+  const beforeRejects = e.rejectCount;
+  const t = e.proposalTimedOut();
+  ok(t.ok, 'proposalTimedOut applies in proposal phase');
+  eq(e.phase, PHASES.PROPOSAL, 'still in proposal after timeout');
+  ok(e.leader.id !== beforeLeader, 'timeout advances leadership');
+  eq(e.rejectCount, beforeRejects, 'timeout does NOT count as a reject');
+
+  // Confirming a team stops the countdown; remaining span goes null off-phase.
+  const need = teamSize(5, e.questIndex);
+  e.proposeTeam(e.leader.id, e.players.slice(0, need).map(p => p.id));
+  eq(e.proposalDeadline, null, 'confirming a team clears the deadline');
+  eq(e.publicState().proposalRemainingMs, null, 'no remaining span outside proposal');
+
+  // proposalTimedOut is a no-op outside the proposal phase.
+  ok(!e.proposalTimedOut().ok, 'timeout ignored when not proposing');
+}
+
+// --- Proposal timer survives serialize/restore ----------------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.setQuestTimer(true, 240);
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+
+  const e2 = new GameEngine();
+  e2.restore(e.serialize());
+  ok(e2.questTimerEnabled, 'timer-enabled flag round-trips');
+  eq(e2.questTimerSeconds, 240, 'timer duration round-trips');
+  // A reload mid-proposal refreshes the deadline rather than restoring a stale one.
+  ok(e2.proposalDeadline != null && e2.proposalDeadline > Date.now(), 'restore refreshes a live proposal deadline');
+
+  // playAgain keeps the host's timer preference.
+  e.playAgain();
+  ok(e.questTimerEnabled && e.questTimerSeconds === 240, 'playAgain preserves timer settings');
+}
+
+// --- Show-pending-voters option -------------------------------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+
+  ok(!e.showPendingVoters, 'pending-voters off by default');
+  eq(e.publicState().showPendingVoters, false, 'flag exposed in publicState (off)');
+  e.setShowPendingVoters(true);
+  eq(e.publicState().showPendingVoters, true, 'flag exposed in publicState (on)');
+
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  e.proposeTeam(e.leader.id, e.players.slice(0, teamSize(5, 0)).map(p => p.id));
+  eq(e.phase, PHASES.VOTE, 'reached vote phase');
+
+  // Two of five have voted: voteProgress marks exactly those, names resolvable.
+  e.castVote('p0', true);
+  e.castVote('p1', false);
+  const prog = e.publicState().voteProgress;
+  eq(prog.filter(x => x.voted).length, 2, 'voteProgress reflects 2 votes cast');
+  eq(prog.filter(x => !x.voted).map(x => x.id).sort(), ['p2', 'p3', 'p4'], 'pending ids are the non-voters');
+
+  // Round-trips through serialize/restore and survives playAgain.
+  const e2 = new GameEngine();
+  e2.restore(e.serialize());
+  ok(e2.showPendingVoters, 'pending-voters flag round-trips');
+  e2.playAgain();
+  ok(e2.showPendingVoters, 'playAgain preserves pending-voters flag');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
