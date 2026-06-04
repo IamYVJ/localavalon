@@ -15,6 +15,12 @@ import { ROLES, ROLE_COUNTS, validateRoleConfig, OPTIONAL_TOGGLES, MIN_PLAYERS, 
 // Filler roles that automatically occupy the remaining seats (not toggleable).
 const FILLER_ROLE_IDS = ['servant', 'minion'];
 
+// The last top-level screen we rendered. The entrance animation (a fade-in from
+// opacity 0) should play ONLY when the screen actually changes — replaying it on
+// every state push / repaint makes the whole screen flicker. We compare against
+// this and add the `screen-enter` class only on a real transition.
+let _lastScreen = null;
+
 export function render(root, app, intents) {
   clear(root);
   let node;
@@ -29,6 +35,11 @@ export function render(root, app, intents) {
     case 'spectator':  node = spectatorScreen(app, intents); break;
     case 'stats':      node = statsScreen(app, intents); break;
     default:           node = homeScreen(app, intents);
+  }
+  // Animate on screen change only — not on every in-screen re-render.
+  if (app.screen !== _lastScreen) {
+    node.classList.add('screen-enter');
+    _lastScreen = app.screen;
   }
   root.appendChild(node);
 

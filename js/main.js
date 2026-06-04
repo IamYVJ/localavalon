@@ -100,17 +100,38 @@ function draw() {
   render(root, app, intents);
 }
 
-// Keep a 1s repaint running only while a proposal countdown is on screen, so the
-// displayed time decrements smoothly without flooding renders the rest of the time.
+// Keep a 1s tick running only while a proposal countdown is on screen. We update
+// ONLY the clock text in place (not a full re-render) so the timer decrements
+// smoothly without tearing down and rebuilding the whole screen every second —
+// the former approach made the entire view flicker once per tick.
 function manageCountdownTicker() {
   const active = (app.screen === 'game' || app.screen === 'spectator') && app.pub
     && app.pub.phase === 'proposal' && app.localProposalDeadline != null;
   if (active && !countdownInterval) {
-    countdownInterval = setInterval(() => render(root, app, intents), 1000);
+    countdownInterval = setInterval(updateCountdownDisplay, 1000);
   } else if (!active && countdownInterval) {
     clearInterval(countdownInterval);
     countdownInterval = null;
   }
+}
+
+// In-place update of the proposal countdown — touches just the clock text and
+// the urgent state, leaving the rest of the DOM untouched (no flicker).
+function updateCountdownDisplay() {
+  if (app.localProposalDeadline == null) return;
+  const remMs = Math.max(0, app.localProposalDeadline - Date.now());
+  const totalSec = Math.ceil(remMs / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const label = `${m}:${String(s).padStart(2, '0')}`;
+  const urgent = totalSec <= 30;
+  // Player board clock (.timer-clock) and spectator clock (.tv-timer-clock).
+  document.querySelectorAll('.timer-clock, .tv-timer-clock')
+    .forEach((node) => { node.textContent = label; });
+  document.querySelectorAll('.proposal-timer')
+    .forEach((node) => node.classList.toggle('urgent', urgent));
+  document.querySelectorAll('.tv-timer')
+    .forEach((node) => node.classList.toggle('urgent', urgent));
 }
 
 // ---------------------------------------------------------------------------

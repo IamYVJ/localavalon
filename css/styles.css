@@ -52,8 +52,13 @@ body {
   display: flex;
   flex-direction: column;
   gap: 20px;
-  animation: fade 0.35s ease;
 }
+
+/* Entrance animation plays only on a real screen change (the `screen-enter`
+   class is added by render() on transitions), never on in-screen repaints —
+   otherwise the whole view would flicker on every state update. */
+.shell.screen-enter,
+.tv-shell.screen-enter { animation: fade 0.35s ease; }
 
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
@@ -664,7 +669,6 @@ body {
   padding: clamp(12px, 2.2vh, 28px) clamp(16px, 3vw, 48px);
   display: flex; flex-direction: column; gap: clamp(10px, 1.8vh, 22px);
   overflow: hidden;
-  animation: fade 0.35s ease;
 }
 
 .tv-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
