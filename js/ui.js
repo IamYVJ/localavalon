@@ -279,6 +279,9 @@ function lobbyScreen(app, intents) {
         players.length < MIN_PLAYERS
           ? `Need at least ${MIN_PLAYERS} players to start.`
           : (v.errors[0] || '')));
+    } else if (v.warnings && v.warnings.length) {
+      // Non-blocking advice: the host can still start with this lineup.
+      children.push(el('p', { class: 'fine warn' }, '⚠ ' + v.warnings[0]));
     }
     children.push(el('div', { class: 'btn-row' },
       el('button', {

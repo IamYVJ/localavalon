@@ -218,6 +218,16 @@ ok(!validateRoleConfig({ merlin: 1, assassin: 1, tristan: 1, servant: 1, minion:
 ok(validateRoleConfig({ merlin: 1, assassin: 1, tristan: 1, isolde: 1, servant: 1, minion: 2 }, 7).ok, 'Lovers config valid for 7p');
 ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3 }, 7).ok, 'Lunatic+Brute config valid for 7p');
 
+// validateRoleConfig: Percival without Morgana is now a soft warning, not a hard block.
+{
+  const v = validateRoleConfig({ merlin: 1, assassin: 1, percival: 1, servant: 1, minion: 1 }, 5);
+  ok(v.ok, 'Percival without Morgana is allowed (soft warning)');
+  ok(v.warnings.length === 1, 'Percival without Morgana produces a warning');
+  // With Morgana present, no such warning.
+  const v2 = validateRoleConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 }, 5);
+  ok(v2.ok && v2.warnings.length === 0, 'Percival WITH Morgana has no warning');
+}
+
 {
   // Lunatic must Fail; Brute may only Fail on quests 1-3.
   const e = new GameEngine();

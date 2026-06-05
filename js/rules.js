@@ -154,13 +154,18 @@ export function defaultRoleConfig(playerCount) {
 
 // ---------------------------------------------------------------------------
 // Validate a role configuration against a player count.
-// Returns { ok, errors:[], good, evil }.
+//
+// `errors` are hard blocks (the game cannot start). `warnings` are soft advice
+// the host may freely ignore — e.g. Percival without Morgana is legal by the
+// official rules, it just leaves Percival with no decoy.
+// Returns { ok, errors:[], warnings:[], good, evil }.
 // ---------------------------------------------------------------------------
 export function validateRoleConfig(cfg, playerCount) {
   const errors = [];
+  const warnings = [];
   const target = ROLE_COUNTS[playerCount];
   if (!target) {
-    return { ok: false, errors: [`Player count must be ${MIN_PLAYERS}-${MAX_PLAYERS}.`], good: 0, evil: 0 };
+    return { ok: false, errors: [`Player count must be ${MIN_PLAYERS}-${MAX_PLAYERS}.`], warnings, good: 0, evil: 0 };
   }
 
   let good = 0, evil = 0;
@@ -174,14 +179,14 @@ export function validateRoleConfig(cfg, playerCount) {
 
   if (!cfg.merlin)   errors.push('Merlin is required.');
   if (!cfg.assassin) errors.push('Assassin is required.');
-  if (cfg.percival && !cfg.morgana) errors.push('Percival should be paired with Morgana, or he sees no decoy.');
+  if (cfg.percival && !cfg.morgana) warnings.push('Percival has no decoy without Morgana — he will see Merlin directly.');
   if (!!cfg.tristan !== !!cfg.isolde) errors.push('Tristan and Isolde must both be in the game.');
   if (!!cfg.lancelotGood !== !!cfg.lancelotEvil) errors.push('Both Lancelots (Good and Evil) must be in the game together.');
 
   if (good !== target.good) errors.push(`Good must total ${target.good} (currently ${good}).`);
   if (evil !== target.evil) errors.push(`Evil must total ${target.evil} (currently ${evil}).`);
 
-  return { ok: errors.length === 0, errors, good, evil };
+  return { ok: errors.length === 0, errors, warnings, good, evil };
 }
 
 // ---------------------------------------------------------------------------

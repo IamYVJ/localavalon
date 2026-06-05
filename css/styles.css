@@ -100,6 +100,7 @@ body {
 }
 .accent { color: var(--accent); }
 .fine { font-size: 13px; color: var(--muted); margin: 0; line-height: 1.5; }
+.fine.warn { color: #E8B84B; }
 .error-text { color: var(--evil); font-size: 14px; margin: 0; }
 
 /* --- Fields -------------------------------------------------------------- */
