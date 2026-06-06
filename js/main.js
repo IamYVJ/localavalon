@@ -51,6 +51,7 @@ const app = {
   statsData: null,           // { summary, leaderboard } from getLeaderboard()
   _gameRecorded: false,      // prevents double-recording the same game
   questNotice: null,         // transient nudge when a player taps a card they can't play
+  confirmEndGame: false,     // host-only: "are you sure?" modal before ending the game
   netStatus: 'online',       // 'online' | 'reconnecting' — drives the reconnect banner
   _reconnectAttempts: 0,
   _netEverOnline: false,     // true once the peer has opened — gates recoverable-error handling
@@ -625,6 +626,7 @@ const intents = {
     app.pub = null; app.priv = null; app.error = '';
     app.me.isHost = false; app.me.id = null; app.me.isSpectator = false;
     app.spectatorMode = false;
+    app.confirmEndGame = false;
     app.netStatus = 'online'; app._netEverOnline = false;
     draw();
   },
@@ -692,6 +694,26 @@ const intents = {
     engine.playAgain();
     rebuildConfig();
     hostSync();
+  },
+
+  // Host-only: end the current game at any point and return everyone to the
+  // lobby. A two-step action — the first tap opens a confirmation modal, the
+  // second (confirm) actually ends the game.
+  requestEndGame: () => { if (app.me.isHost) { app.confirmEndGame = true; draw(); } },
+  cancelEndGame:  () => { app.confirmEndGame = false; draw(); },
+  endGame: () => {
+    if (!app.me.isHost || !engine) return;
+    app.confirmEndGame = false;
+    app._gameRecorded = false;
+    // Drop any pending reveal/advance timers from the game we're aborting so a
+    // late timeout can't mutate the fresh lobby (they no-op on phase mismatch
+    // anyway, but clear them to be tidy and stop the countdown ticker).
+    if (voteTimer)     { clearTimeout(voteTimer); voteTimer = null; }
+    if (questTimer)    { clearTimeout(questTimer); questTimer = null; }
+    if (proposalTimer) { clearTimeout(proposalTimer); proposalTimer = null; }
+    engine.endGame();   // back to lobby, keeping players + config + options
+    rebuildConfig();
+    hostSync();         // broadcasts the lobby state, returning every client to the join/lobby view
   },
 
   // Statistics intents

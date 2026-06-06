@@ -422,6 +422,15 @@ export class GameEngine {
     this.phase = PHASES.GAMEOVER;
   }
 
+  /**
+   * Host-only: abort the current game at any phase and return everyone to the
+   * lobby, keeping the seated players, role config, and game options intact so
+   * a new game can be set up immediately. Mechanically identical to playAgain()
+   * (which is the gameover path) — kept as a named method for clarity at the
+   * call site and so it can diverge later if needed.
+   */
+  endGame() { this.playAgain(); }
+
   /** Re-lobby keeping the same players and role config. */
   playAgain() {
     const players = this.players.map(p => ({ ...p, roleId: null, ready: false }));

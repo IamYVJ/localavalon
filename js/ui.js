@@ -51,6 +51,45 @@ export function render(root, app, intents) {
       'Reconnecting…',
     ));
   }
+
+  // Host-only: a floating "End game" control available during active play (any
+  // phase past the lobby, before game-over — game-over already has Play Again).
+  // It overlays both the host's game board and the spectating host's TV view.
+  const inActiveGame = app.pub && app.pub.phase !== 'lobby' && app.pub.phase !== 'gameover';
+  if (app.me.isHost && inActiveGame) {
+    root.appendChild(el('button', {
+      class: 'host-endgame',
+      title: 'End the game and send everyone back to the lobby',
+      onclick: () => intents.requestEndGame(),
+    }, '✕ END GAME'));
+  }
+
+  // Confirmation modal ("are you sure?") before the game actually ends.
+  if (app.me.isHost && app.confirmEndGame) {
+    root.appendChild(endGameModal(intents));
+  }
+}
+
+// "Are you sure?" overlay shown before the host ends a game in progress.
+function endGameModal(intents) {
+  const overlay = el('div', {
+    class: 'modal-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'End game confirmation',
+  },
+    el('div', { class: 'modal' },
+      el('h2', { class: 'modal-title' }, 'End this game?'),
+      el('p', { class: 'modal-body' },
+        'This ends the current game for everyone and returns all players to the lobby. ',
+        'The current roles and quest progress will be lost — but everyone stays connected, ',
+        'so you can set up and start a new game right away.'),
+      el('div', { class: 'btn-row' },
+        el('button', { class: 'btn btn-danger', onclick: () => intents.endGame() }, '✕ END GAME'),
+        el('button', { class: 'btn btn-secondary', onclick: () => intents.cancelEndGame() }, 'CANCEL'),
+      ),
+    ),
+  );
+  // A click on the backdrop (outside the dialog) cancels.
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) intents.cancelEndGame(); });
+  return overlay;
 }
 
 // ---------------------------------------------------------------------------

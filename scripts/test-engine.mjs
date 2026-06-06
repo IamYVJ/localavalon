@@ -494,6 +494,36 @@ ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3
   ok(e.questTimerEnabled && e.questTimerSeconds === 240, 'playAgain preserves timer settings');
 }
 
+// --- Host "end game" mid-round returns to a clean lobby --------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  const cfg = { merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 };
+  e.setConfig(cfg);
+  e.setAllowReveal(true);
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  // Drive a couple of rounds so there's real mid-game state to discard.
+  e.proposeTeam(e.leader.id, e.players.slice(0, teamSize(5, 0)).map(p => p.id));
+  e.castVote('p0', true); e.castVote('p1', true); e.castVote('p2', true);
+  e.castVote('p3', false); e.castVote('p4', false);
+  e.acknowledgeVote();
+  ok(e.phase === PHASES.QUEST, 'reached a quest mid-game');
+
+  // End the game at this point.
+  e.endGame();
+  eq(e.phase, PHASES.LOBBY, 'endGame returns to the lobby');
+  eq(e.count, 5, 'endGame keeps all seated players');
+  eq(e.config, cfg, 'endGame preserves the role config');
+  ok(e.allowReveal === true, 'endGame preserves game options');
+  ok(e.players.every(p => p.roleId === null && p.ready === false), 'endGame clears roles + ready flags');
+  eq(e.questResults, [null, null, null, null, null], 'endGame clears quest results');
+  eq(e.rejectCount, 0, 'endGame clears the reject track');
+  ok(e.proposal === null && e.winner === null, 'endGame clears proposal + winner');
+  // A fresh game can be started straight away.
+  ok(e.startGame().ok, 'can start a new game after endGame');
+}
+
 // --- Show-pending-voters option -------------------------------------------
 {
   const e = new GameEngine();
