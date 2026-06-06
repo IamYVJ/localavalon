@@ -70,7 +70,14 @@ export function createHost(code, handlers = {}) {
 
   peer.on('connection', (conn) => {
     conn.on('open', () => {
+      // A reconnecting peer keeps its id but opens a NEW DataConnection. Adopt
+      // the new one FIRST (overwrite the map), then retire any prior connection
+      // for the same id. The drop() guard below keys off the CURRENT map entry,
+      // so the old connection's late close/error can no longer evict the fresh
+      // one (which previously dropped a player the instant they rejoined).
+      const prev = connections.get(conn.peer);
       connections.set(conn.peer, conn);
+      if (prev && prev !== conn) { try { prev.close(); } catch (_) {} }
       handlers.onConnect && handlers.onConnect(conn.peer, conn);
     });
     conn.on('data', (raw) => {
@@ -78,7 +85,10 @@ export function createHost(code, handlers = {}) {
       if (msg) handlers.onData && handlers.onData(conn.peer, msg);
     });
     const drop = () => {
-      if (connections.has(conn.peer)) {
+      // Only treat this as a real disconnect if THIS connection is still the
+      // current one for the peer. A stale handler from a replaced connection
+      // must not evict the live one (which would drop a just-rejoined player).
+      if (connections.get(conn.peer) === conn) {
         connections.delete(conn.peer);
         handlers.onDisconnect && handlers.onDisconnect(conn.peer);
       }
