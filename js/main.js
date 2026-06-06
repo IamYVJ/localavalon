@@ -160,6 +160,19 @@ function rebuildConfig() {
   engine.setConfig(cfg);
 }
 
+// Which base screen the host should be on right now. A SPECTATING host watches
+// the single-screen TV view during active play, but uses the normal game screen
+// for the lobby (role config + start) and game over (reveal + Play Again). A
+// playing host always uses 'game'. (Returns null to mean "don't touch", e.g.
+// while the host is on the stats screen.)
+function hostBaseScreen() {
+  if (app.me.isHost && app.me.isSpectator && app.pub
+      && app.pub.phase !== 'lobby' && app.pub.phase !== 'gameover') {
+    return 'spectator';
+  }
+  return 'game';
+}
+
 // ---------------------------------------------------------------------------
 // HOST: push state. Renders the host's own view and sends each client the
 // public state plus ONLY that player's private slice.
@@ -167,6 +180,11 @@ function rebuildConfig() {
 function hostSync() {
   app.pub = engine.publicState();
   app.priv = engine.privateStateFor(app.me.id);
+  // Keep the host on the right screen as phases change. Only ever flip between
+  // the two host-play screens — never yank them off stats/error/etc.
+  if (app.me.isHost && (app.screen === 'game' || app.screen === 'spectator')) {
+    app.screen = hostBaseScreen();
+  }
   // Persist the authoritative state so a host reload can rehydrate the game.
   saveEngineSnapshot(engine.serialize());
 
@@ -326,43 +344,58 @@ function hostHandlers() {
 }
 
 function startHosting() {
-  const name = (app.me.name || '').trim();
+  const asSpectator = !!app.spectatorMode;
+  // A spectating host still labels the room (discovery + session); fall back to a
+  // generic name so they're never blocked just for not typing one.
+  const name = (app.me.name || '').trim() || (asSpectator ? 'Host' : '');
   if (!name) { app.screen = 'home'; app.error = 'Enter a name first.'; draw(); return; }
 
   const code = generateRoomCode();
   app.code = code; saveCode(code);
   app.me.id = peerIdForCode(code);
+  app.me.name = name;
   app.me.isHost = true;
+  app.me.isSpectator = asSpectator;
   app.error = '';
 
   engine = new GameEngine();
-  engine.addPlayer(app.me.id, name, { isHost: true });
+  if (asSpectator) {
+    // Host-spectator owns the room but takes NO seat: never dealt a role, never
+    // counts toward the player total, never receives a private slice. hostId
+    // still points at us so host-detection and lobby info work.
+    engine.hostId = app.me.id;
+  } else {
+    engine.addPlayer(app.me.id, name, { isHost: true });
+  }
   engine.setAllowReveal(app.allowReveal);
   engine.setRandomLeaderOrder(app.randomLeaderOrder);
   engine.setQuestTimer(app.questTimerEnabled, app.questTimerSeconds);
   engine.setShowPendingVoters(app.showPendingVoters);
   rebuildConfig();
 
-  saveSession({ mode: 'host', code, name });
+  saveSession({ mode: 'host', code, name, spectator: asSpectator });
   net = createHost(code, hostHandlers());
 
   // Land in the lobby immediately so the host sees the code while the broker
-  // finishes opening the peer.
+  // finishes opening the peer. hostSync() routes a spectating host to the TV
+  // view once play begins.
   app.screen = 'game';
   hostSync();
 }
 
 // Rehydrate an in-progress game after a HOST reload, re-using the same code.
-function resumeHosting(code, snapshot, name) {
+function resumeHosting(code, snapshot, name, asSpectator = false) {
   app.code = code; saveCode(code);
   app.me.id = peerIdForCode(code);
   app.me.isHost = true;
+  app.me.isSpectator = asSpectator;
   app.me.name = name || app.me.name;
   app.error = '';
 
   engine = new GameEngine();
   engine.restore(snapshot);
-  // Make sure the host's own seat points at this (deterministic) peer id.
+  // Make sure host-detection points at this (deterministic) peer id. A playing
+  // host also re-marks their own seat online; a spectating host has no seat.
   engine.hostId = app.me.id;
   const hostPlayer = engine.getPlayer(app.me.id);
   if (hostPlayer) hostPlayer.online = true;
@@ -381,7 +414,7 @@ function resumeHosting(code, snapshot, name) {
     app.toggles[def.key] = def.roleIds.every(rid => (cfg[rid] || 0) > 0);
   }
 
-  saveSession({ mode: 'host', code, name: app.me.name });
+  saveSession({ mode: 'host', code, name: app.me.name, spectator: asSpectator });
   net = createHost(code, hostHandlers());
 
   app.screen = 'game';
@@ -672,8 +705,10 @@ const intents = {
     }
   },
   backToGame: () => {
-    app.screen = 'game';
     app.statsData = null;
+    // A spectating host returns to the TV view if play is underway, otherwise
+    // the normal game screen. Everyone else just goes back to 'game'.
+    app.screen = app.me.isHost ? hostBaseScreen() : 'game';
     draw();
   },
   resetStats: () => {
@@ -710,7 +745,7 @@ function resumeSession() {
   if (s.mode === 'host') {
     const snapshot = loadEngineSnapshot();
     if (!snapshot) return false;          // nothing to rehydrate → start fresh
-    resumeHosting(s.code, snapshot, s.name);
+    resumeHosting(s.code, snapshot, s.name, !!s.spectator);
     return true;
   }
   if (s.mode === 'join' && s.name) {

@@ -49,6 +49,47 @@ ok(!validateRoleConfig({ merlin: 2, assassin: 1, servant: 1, minion: 1 }, 5).ok,
   eq(assassinSees, ['c', 'e'], 'Assassin (evil) sees fellow evil Mordred+Morgana');
 }
 {
+  // Percival with NO Morgana (e.g. Mordred-only Evil): the single name shown is
+  // the confirmed Merlin, and the label/note must say so — not "which is which".
+  const players = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'mordred' },
+    { id: 'd', name: 'D', roleId: 'percival' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  const k = computeKnowledge(players[3], players);
+  eq(k.sees.map(s => s.id), ['a'], 'Percival without Morgana sees only Merlin');
+  ok(/confirmed/i.test(k.seesLabel), 'Percival label says Merlin is confirmed when no Morgana');
+  ok(!/which is which/i.test(k.seesLabel), 'Percival label drops the decoy phrasing when no Morgana');
+}
+{
+  // Merlin's label must not claim Mordred is hidden when no Mordred is in play.
+  const players = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'servant' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  const km = computeKnowledge(players[0], players);
+  ok(!/mordred/i.test(km.seesLabel), 'Merlin label drops "(Mordred hidden)" when no Mordred');
+  eq(km.sees.map(s => s.id), ['b'], 'Merlin still sees the Assassin when no Mordred');
+}
+{
+  // With Mordred present, Merlin's label DOES note the hidden Mordred.
+  const players = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'mordred' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  const km = computeKnowledge(players[0], players);
+  ok(/mordred/i.test(km.seesLabel), 'Merlin label notes hidden Mordred when present');
+  eq(km.sees.map(s => s.id).sort(), ['b'], 'Merlin sees Assassin but not the hidden Mordred');
+}
+{
   // Oberon isolation.
   const players = [
     { id: 'a', name: 'A', roleId: 'assassin' },

@@ -79,6 +79,22 @@ function homeScreen(app, intents) {
     oninput: (e) => intents.setName(e.target.value),
   });
 
+  // When on, the host runs the room but takes NO seat — they never get a role
+  // and don't count toward the player total. Instead they watch the single-screen
+  // TV view, ideal for running the game from a shared display.
+  const hostSpectate = !!app.spectatorMode;
+  const spectatorToggle = el('label', { class: 'toggle spectator-toggle' + (hostSpectate ? ' on' : '') },
+    el('input', {
+      type: 'checkbox', ...(hostSpectate ? { checked: true } : {}),
+      onchange: () => intents.toggleSpectatorMode(),
+    }),
+    el('span', { class: 'toggle-box' }),
+    el('span', { class: 'toggle-text' },
+      el('span', { class: 'toggle-name' }, 'Host as spectator (TV mode)'),
+      el('span', { class: 'toggle-blurb' }, 'Run the game and watch on a shared screen without taking a seat — everyone else joins from their own phone.'),
+    ),
+  );
+
   return shell(
     wordmark(),
     el('h1', { class: 'hero' }, 'Avalon'),
@@ -86,8 +102,10 @@ function homeScreen(app, intents) {
       'A game of ', el('span', { class: 'accent' }, 'loyalty and betrayal'),
       '. Gather 5–10 players on the same Wi-Fi, each on their own phone, and find the spy among you.'),
     el('div', { class: 'field-group' }, nameInput),
+    el('div', { class: 'toggle-list' }, spectatorToggle),
     el('div', { class: 'btn-row' },
-      el('button', { class: 'btn btn-primary', onclick: () => intents.host() }, '> HOST GAME'),
+      el('button', { class: 'btn btn-primary', onclick: () => intents.host() },
+        hostSpectate ? '▷ HOST AS SPECTATOR' : '> HOST GAME'),
       el('button', { class: 'btn btn-secondary', onclick: () => intents.gotoJoin() }, '▷ JOIN GAME'),
     ),
     el('p', { class: 'fine' }, 'Plays peer-to-peer in your browser. No accounts, no servers.'),
@@ -896,7 +914,10 @@ function spectatorScreen(app, intents) {
   }
 
   const body = (pub.phase === 'lobby')
-    ? el('section', { class: 'tv-body tv-body-lobby' }, tvRoster(pub), tvStatus(app))
+    ? el('section', { class: 'tv-body tv-body-lobby' },
+        el('div', { class: 'tv-left' }, tvRoster(pub), tvStatus(app)),
+        tvRolesLineup(pub),
+      )
     : el('section', { class: 'tv-body' },
         el('div', { class: 'tv-left' }, tvQuestTrack(pub), tvRoster(pub)),
         tvStatus(app),
@@ -949,6 +970,42 @@ function tvRoster(pub) {
         p.online ? null : el('span', { class: 'tv-tag tv-tag-off' }, 'AWAY'),
       ),
     )),
+  );
+}
+
+// Lobby-only roles lineup for the TV: the FULL role catalogue with descriptions,
+// split Good/Evil, dimming the ones not in this game's config and marking the
+// selected ones (filler roles show their seat count). This is all public info
+// (the config is in publicState) — it reveals the menu, never who holds what.
+function tvRolesLineup(pub) {
+  const cfg = pub.config || {};
+  const card = (role) => {
+    const n = cfg[role.id] || 0;
+    const inPlay = n > 0 || !role.optional; // Merlin/Assassin are always in
+    const isFiller = FILLER_ROLE_IDS.includes(role.id);
+    const state = isFiller ? `×${n}` : (inPlay ? 'IN' : '—');
+    return el('li', {
+      class: 'tv-role ' + (role.team === 'evil' ? 'evil' : 'good') + (inPlay ? ' in' : ' out'),
+    },
+      el('div', { class: 'tv-role-head' },
+        el('span', { class: 'tv-role-name' }, role.name),
+        el('span', { class: 'tv-role-state' }, state),
+      ),
+      el('p', { class: 'tv-role-blurb' }, role.blurb),
+    );
+  };
+  const all = Object.values(ROLES);
+  const good = all.filter(r => r.team === 'good');
+  const evil = all.filter(r => r.team === 'evil');
+  return el('div', { class: 'tv-roles' },
+    el('div', { class: 'tv-roles-col' },
+      el('div', { class: 'tv-roles-head good' }, 'GOOD'),
+      el('ul', { class: 'tv-roles-list' }, ...good.map(card)),
+    ),
+    el('div', { class: 'tv-roles-col' },
+      el('div', { class: 'tv-roles-head evil' }, 'EVIL'),
+      el('ul', { class: 'tv-roles-list' }, ...evil.map(card)),
+    ),
   );
 }
 

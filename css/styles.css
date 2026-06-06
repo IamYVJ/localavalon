@@ -705,9 +705,35 @@ body {
 
 /* Body split: roster (+ quest track) on the left, status on the right */
 .tv-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1.2fr 1fr; gap: clamp(12px, 2vw, 28px); }
-.tv-body-lobby { grid-template-columns: 1fr 1fr; }
+.tv-body-lobby { grid-template-columns: 0.85fr 1.15fr; }
+
+/* Lobby roles lineup (spectator/TV): full catalogue, Good/Evil columns */
+.tv-roles { min-height: 0; overflow: hidden; display: grid; grid-template-columns: 1fr 1fr; gap: clamp(10px, 1.5vw, 22px); }
+.tv-roles-col { min-height: 0; display: flex; flex-direction: column; gap: clamp(6px, 1vh, 10px); }
+.tv-roles-head { font-family: var(--mono); letter-spacing: 0.18em; font-size: clamp(11px, 1.2vw, 16px); }
+.tv-roles-head.good { color: var(--accent); }
+.tv-roles-head.evil { color: var(--evil); }
+.tv-roles-list { list-style: none; margin: 0; padding: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: clamp(5px, 0.8vh, 9px); }
+.tv-role {
+  border: 1px solid var(--border-soft); border-radius: 12px; background: var(--surface);
+  padding: clamp(6px, 1vh, 12px) clamp(9px, 1.2vw, 16px);
+}
+.tv-role.out { opacity: 0.34; }
+.tv-role.in.evil { border-color: rgba(255, 107, 107, 0.4); }
+.tv-role-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.tv-role-name {
+  font-family: var(--serif); font-size: clamp(14px, 1.5vw, 22px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tv-role-state { flex-shrink: 0; font-family: var(--mono); letter-spacing: 0.08em; font-size: clamp(10px, 1vw, 14px); color: var(--muted); }
+.tv-role.in .tv-role-state { color: var(--accent); }
+.tv-role.in.evil .tv-role-state { color: var(--evil); }
+.tv-role-blurb { margin: 2px 0 0; color: var(--muted); font-size: clamp(10px, 1vw, 13px); line-height: 1.35; }
 .tv-left { min-height: 0; display: flex; flex-direction: column; gap: clamp(10px, 1.8vh, 20px); }
 .tv-left .tv-roster { flex: 1; }
+/* In the lobby the roster sizes to its contents (roster + status sit at the top)
+   so it can't balloon and push the roles lineup off-screen. */
+.tv-body-lobby .tv-left .tv-roster { flex: 0 0 auto; }
 
 .tv-roster {
   list-style: none; margin: 0; padding: 0; min-height: 0; overflow: hidden;

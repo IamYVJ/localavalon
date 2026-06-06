@@ -231,7 +231,9 @@ export function computeKnowledge(player, players, opts = {}) {
     const sees = others.filter(p =>
         (evilOf(p) && p.roleId !== 'mordred') || p.roleId === 'untrustworthy')
                         .map(p => ({ id: p.id, name: p.name }));
-    return { team, seesLabel: 'Evil players (Mordred hidden)', sees,
+    // Only claim Mordred is hidden if Mordred is actually in play.
+    const hasMordred = others.some(p => p.roleId === 'mordred');
+    return { team, seesLabel: hasMordred ? 'Evil players (Mordred hidden)' : 'All Evil players', sees,
              note: 'Win quietly — the Assassin is hunting you.' };
   }
 
@@ -259,9 +261,15 @@ export function computeKnowledge(player, players, opts = {}) {
   }
 
   if (player.roleId === 'percival') {
-    // Sees Merlin + Morgana, unlabeled.
+    // Sees Merlin + Morgana, unlabeled. Without Morgana there is no decoy, so
+    // the single name shown IS the confirmed Merlin.
     const sees = others.filter(p => p.roleId === 'merlin' || p.roleId === 'morgana')
                         .map(p => ({ id: p.id, name: p.name }));
+    const hasDecoy = others.some(p => p.roleId === 'morgana');
+    if (!hasDecoy) {
+      return { team, seesLabel: 'Merlin (confirmed)', sees,
+               note: 'No Morgana is in play, so this is the real Merlin.' };
+    }
     return { team, seesLabel: 'Merlin & Morgana (you cannot tell which is which)', sees,
              note: 'One of these is the real Merlin.' };
   }
