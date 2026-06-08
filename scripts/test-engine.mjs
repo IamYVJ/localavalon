@@ -524,6 +524,74 @@ ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3
   ok(e.startGame().ok, 'can start a new game after endGame');
 }
 
+// --- Player leaves mid-game and rejoins with the same name -----------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']); // p2's name is 'C'
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  const role = e.getPlayer('p2').roleId;
+
+  // p2 leaves: the host marks them offline on disconnect.
+  e.markOffline('p2');
+  eq(e.count, 5, 'leaving mid-game keeps the seat (held offline)');
+  ok(!e.getPlayer('p2').online, 'left player is marked offline, not removed');
+
+  // Rejoin from a fresh connection id but the SAME name reclaims the seat+role.
+  const r = e.addPlayer('p2-new', 'C');
+  ok(r.ok && r.reconnected, 'rejoin by same name reclaims the seat');
+  eq(e.count, 5, 'rejoin does not create a duplicate seat');
+  const after = e.getPlayer('p2-new');
+  ok(after && after.online, 'rejoined player is back online');
+  eq(after && after.roleId, role, 'rejoined player keeps their original role');
+  ok(!e.getPlayer('p2'), 'the stale connection id is gone after the id remap');
+
+  // Contrast: leaving during the LOBBY frees the seat entirely (clean roster).
+  const e2 = new GameEngine();
+  seat(e2, ['Host', 'B', 'C']);
+  e2.markOffline('p2');
+  eq(e2.count, 2, 'leaving in the lobby drops the seat');
+}
+
+// --- Reconnect by clientId even when the stale seat still looks online ------
+// On mobile, WebRTC is slow to detect a dropped channel, so the host often
+// still shows a disconnected player's seat as `online` when they reconnect.
+// A persistent per-device clientId must reclaim the seat anyway — otherwise the
+// name-only path rejects ("name already taken") and the player is locked out.
+{
+  const e = new GameEngine();
+  // Seat with explicit clientIds so we can reclaim by device id.
+  e.addPlayer('p0', 'Host', { isHost: true, clientId: 'dev-host' });
+  e.addPlayer('p1', 'B', { clientId: 'dev-b' });
+  e.addPlayer('p2', 'C', { clientId: 'dev-c' });
+  e.addPlayer('p3', 'D', { clientId: 'dev-d' });
+  e.addPlayer('p4', 'E', { clientId: 'dev-e' });
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  const role = e.getPlayer('p2').roleId;
+
+  // The seat is STILL online (host hasn't detected the drop yet).
+  ok(e.getPlayer('p2').online, 'stale seat still appears online (mobile case)');
+
+  // Same device, new connection id: clientId reclaims despite the online flag.
+  const r = e.addPlayer('p2-new', 'C', { clientId: 'dev-c' });
+  ok(r.ok && r.reconnected, 'clientId reclaims an online seat (same device)');
+  eq(e.count, 5, 'clientId reclaim does not create a duplicate seat');
+  eq(e.getPlayer('p2-new') && e.getPlayer('p2-new').roleId, role, 'role preserved on clientId reclaim');
+  ok(!e.getPlayer('p2'), 'old connection id is gone after clientId remap');
+
+  // A DIFFERENT device using a taken, still-online name is still rejected.
+  const r2 = e.addPlayer('intruder', 'C', { clientId: 'dev-other' });
+  ok(!r2.ok, 'a different device cannot steal an online name');
+
+  // Retyped display name is honoured on a clientId reclaim.
+  const r3 = e.addPlayer('p2-newer', 'Charlie', { clientId: 'dev-c' });
+  ok(r3.ok && r3.reconnected, 'clientId reclaim works after id changed again');
+  eq(e.getPlayer('p2-newer') && e.getPlayer('p2-newer').name, 'Charlie', 'retyped name honoured on reclaim');
+}
+
 // --- Show-pending-voters option -------------------------------------------
 {
   const e = new GameEngine();

@@ -52,43 +52,65 @@ export function render(root, app, intents) {
     ));
   }
 
-  // Host-only: a floating "End game" control available during active play (any
-  // phase past the lobby, before game-over — game-over already has Play Again).
-  // It overlays both the host's game board and the spectating host's TV view.
+  // Floating exit control during active play (any phase past the lobby, before
+  // game-over — game-over already has its own buttons). The HOST gets "End game"
+  // (ends for everyone); every other PLAYER gets "Leave game" (just themselves).
+  // It overlays both the game board and a spectating host's TV view.
   const inActiveGame = app.pub && app.pub.phase !== 'lobby' && app.pub.phase !== 'gameover';
   if (app.me.isHost && inActiveGame) {
     root.appendChild(el('button', {
-      class: 'host-endgame',
+      class: 'exit-btn',
       title: 'End the game and send everyone back to the lobby',
       onclick: () => intents.requestEndGame(),
     }, '✕ END GAME'));
+  } else if (!app.me.isHost && !app.me.isSpectator && app.me.id && inActiveGame) {
+    root.appendChild(el('button', {
+      class: 'exit-btn',
+      title: 'Leave the game (you can rejoin with the same name and code)',
+      onclick: () => intents.requestLeaveGame(),
+    }, '✕ LEAVE GAME'));
   }
 
-  // Confirmation modal ("are you sure?") before the game actually ends.
+  // Confirmation modals ("are you sure?").
   if (app.me.isHost && app.confirmEndGame) {
-    root.appendChild(endGameModal(intents));
+    root.appendChild(confirmModal({
+      title: 'End this game?',
+      body: 'This ends the current game for everyone and returns all players to the lobby. '
+          + 'The current roles and quest progress will be lost — but everyone stays connected, '
+          + 'so you can set up and start a new game right away.',
+      confirmLabel: '✕ END GAME',
+      onConfirm: () => intents.endGame(),
+      onCancel: () => intents.cancelEndGame(),
+    }));
+  }
+  if (!app.me.isHost && app.confirmLeaveGame) {
+    root.appendChild(confirmModal({
+      title: 'Leave the game?',
+      body: 'You\'ll return to the home screen. While the game is in progress your seat is held, '
+          + 'so you can rejoin from this device — just enter the same name and room code to '
+          + 'reclaim your spot and role.',
+      confirmLabel: '✕ LEAVE GAME',
+      onConfirm: () => intents.leaveGame(),
+      onCancel: () => intents.cancelLeaveGame(),
+    }));
   }
 }
 
-// "Are you sure?" overlay shown before the host ends a game in progress.
-function endGameModal(intents) {
+// Generic "are you sure?" overlay. Clicking the backdrop cancels.
+function confirmModal({ title, body, confirmLabel, confirmClass = 'btn-danger', onConfirm, onCancel }) {
   const overlay = el('div', {
-    class: 'modal-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'End game confirmation',
+    class: 'modal-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': title,
   },
     el('div', { class: 'modal' },
-      el('h2', { class: 'modal-title' }, 'End this game?'),
-      el('p', { class: 'modal-body' },
-        'This ends the current game for everyone and returns all players to the lobby. ',
-        'The current roles and quest progress will be lost — but everyone stays connected, ',
-        'so you can set up and start a new game right away.'),
+      el('h2', { class: 'modal-title' }, title),
+      el('p', { class: 'modal-body' }, body),
       el('div', { class: 'btn-row' },
-        el('button', { class: 'btn btn-danger', onclick: () => intents.endGame() }, '✕ END GAME'),
-        el('button', { class: 'btn btn-secondary', onclick: () => intents.cancelEndGame() }, 'CANCEL'),
+        el('button', { class: 'btn ' + confirmClass, onclick: onConfirm }, confirmLabel),
+        el('button', { class: 'btn btn-secondary', onclick: onCancel }, 'CANCEL'),
       ),
     ),
   );
-  // A click on the backdrop (outside the dialog) cancels.
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) intents.cancelEndGame(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) onCancel(); });
   return overlay;
 }
 
@@ -354,7 +376,7 @@ function lobbyScreen(app, intents) {
     children.push(el('div', { class: 'spinner' }));
     children.push(el('div', { class: 'btn-row' },
       el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
-      el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'LEAVE')));
+      el('button', { class: 'btn btn-secondary', onclick: intents.requestLeaveGame }, 'LEAVE')));
   }
 
   return shell(...children, liveRegion(`${players.length} players in lobby`));
@@ -919,7 +941,7 @@ function gameOverScreen(app, intents) {
     children.push(el('p', { class: 'fine' }, 'Waiting for the host to start a new round, or leave to go home.'));
     children.push(el('div', { class: 'btn-row' },
       el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
-      el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'LEAVE')));
+      el('button', { class: 'btn btn-secondary', onclick: intents.requestLeaveGame }, 'LEAVE')));
   }
 
   return shell(...children, liveRegion(evilWon ? 'Evil wins' : 'Good wins'));

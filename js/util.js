@@ -57,6 +57,31 @@ export function saveName(n) { try { localStorage.setItem(NAME_KEY, n); } catch (
 export function loadCode()  { try { return localStorage.getItem(CODE_KEY) || ''; } catch (_) { return ''; } }
 export function saveCode(c) { try { localStorage.setItem(CODE_KEY, c); } catch (_) {} }
 
+// --- Stable per-device client id ------------------------------------------
+// A persistent, anonymous identifier for THIS device/browser, generated once
+// and reused forever. It is sent with the join message so the host can reclaim
+// a seat for a reconnecting player even when their old connection still looks
+// "online" (mobile WebRTC is slow to detect a dropped channel). This is what
+// makes "rejoin with the same name, device, and code" reliable. It is never
+// shown in the UI and never broadcast to other players.
+const CLIENT_KEY = 'localavalon.clientId';
+export function loadClientId() {
+  try {
+    let id = localStorage.getItem(CLIENT_KEY);
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'c-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+      localStorage.setItem(CLIENT_KEY, id);
+    }
+    return id;
+  } catch (_) {
+    // Storage unavailable (private mode): a per-session id still helps within
+    // this page's lifetime, though it won't survive a full reload.
+    return 'c-' + Math.random().toString(36).slice(2);
+  }
+}
+
 // --- Session resume (reload / rejoin returns to the same game) -------------
 // We remember whether this device was hosting or joining, the room code, and
 // the player name, plus (for a host) a snapshot of the authoritative engine so

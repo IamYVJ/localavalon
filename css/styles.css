@@ -826,10 +826,10 @@ body {
 .tv-reveal-name { font-family: var(--serif); font-size: clamp(16px, 1.8vw, 26px); }
 .tv-reveal-role { font-family: var(--mono); font-size: clamp(12px, 1.2vw, 16px); color: var(--muted); }
 
-/* --- Host: end-game control + confirmation modal ------------------------- */
+/* --- Exit controls (host End Game / player Leave Game) + confirm modal ---- */
 /* Floating control, top-right, available over both the player board and the
    spectating host's TV view. Sits below the modal/reconnect layers. */
-.host-endgame {
+.exit-btn {
   position: fixed;
   top: 14px; right: 14px;
   z-index: 45;
@@ -844,7 +844,7 @@ body {
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
   transition: background 0.15s ease, border-color 0.15s ease;
 }
-.host-endgame:hover { background: var(--evil-dim); border-color: var(--evil); }
+.exit-btn:hover { background: var(--evil-dim); border-color: var(--evil); }
 
 .modal-overlay {
   position: fixed; inset: 0;

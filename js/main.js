@@ -16,6 +16,7 @@ import {
   generateRoomCode, normalizeCode, copyText,
   loadName, saveName, loadCode, saveCode,
   saveSession, loadSession, clearSession, saveEngineSnapshot, loadEngineSnapshot,
+  loadClientId,
 } from './util.js';
 import { recordGame, getLeaderboard, clearStats } from './stats.js';
 
@@ -52,6 +53,7 @@ const app = {
   _gameRecorded: false,      // prevents double-recording the same game
   questNotice: null,         // transient nudge when a player taps a card they can't play
   confirmEndGame: false,     // host-only: "are you sure?" modal before ending the game
+  confirmLeaveGame: false,   // non-host: "are you sure?" modal before leaving the game
   netStatus: 'online',       // 'online' | 'reconnecting' — drives the reconnect banner
   _reconnectAttempts: 0,
   _netEverOnline: false,     // true once the peer has opened — gates recoverable-error handling
@@ -267,7 +269,7 @@ function handleIntent(playerId, msg) {
       net.sendTo(playerId, { type: 'lobbyInfo', info: lobbyInfo() });
       break;
     case 'join': {
-      const r = engine.addPlayer(playerId, msg.name, { isHost: false });
+      const r = engine.addPlayer(playerId, msg.name, { isHost: false, clientId: msg.clientId });
       if (!r.ok) { net.sendTo(playerId, { type: 'rejected', message: r.error }); return; }
       net.sendTo(playerId, { type: 'welcome', playerId });
       if (engine.phase === 'lobby') rebuildConfig();
@@ -447,7 +449,7 @@ function startJoining(rawCode, rawName, asSpectator = false) {
   net = joinHost(code, {
     onOpen: () => net.send(asSpectator
       ? { type: 'spectate', name: effectiveName }
-      : { type: 'join', name }),
+      : { type: 'join', name, clientId: loadClientId() }),
     onNetStatus: (status) => { app.netStatus = status; draw(); },
     onData: (msg) => {
       // Any message means the link is live again — cancel a pending retry loop.
@@ -627,6 +629,7 @@ const intents = {
     app.me.isHost = false; app.me.id = null; app.me.isSpectator = false;
     app.spectatorMode = false;
     app.confirmEndGame = false;
+    app.confirmLeaveGame = false;
     app.netStatus = 'online'; app._netEverOnline = false;
     draw();
   },
@@ -714,6 +717,18 @@ const intents = {
     engine.endGame();   // back to lobby, keeping players + config + options
     rebuildConfig();
     hostSync();         // broadcasts the lobby state, returning every client to the join/lobby view
+  },
+
+  // Non-host: leave the game at any point. A two-step action — the first tap
+  // opens the confirmation modal, the second leaves. Leaving disconnects and
+  // returns home, but the host HOLDS the seat (marks it offline) while the game
+  // is in progress, so the player can rejoin from the same device by entering
+  // the same name + room code — the engine reclaims their seat and role by name.
+  requestLeaveGame: () => { if (!app.me.isHost) { app.confirmLeaveGame = true; draw(); } },
+  cancelLeaveGame:  () => { app.confirmLeaveGame = false; draw(); },
+  leaveGame: () => {
+    app.confirmLeaveGame = false;
+    intents.goHome();   // tears down the connection (host keeps the seat offline) and goes home
   },
 
   // Statistics intents

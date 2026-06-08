@@ -61,22 +61,46 @@ export class GameEngine {
   // Roster management
   // -------------------------------------------------------------------------
 
-  /** Seat a player, or let them reclaim their seat on reconnect (same name). */
-  addPlayer(id, name, { isHost = false } = {}) {
+  /**
+   * Seat a player, or let them reclaim their seat on reconnect.
+   *
+   * Reclaim precedence:
+   *   1. Stable clientId (same device) — reclaims even if the seat still shows
+   *      ONLINE. This is essential: mobile WebRTC is slow/unreliable at noticing
+   *      a dropped channel, so a reconnecting player often arrives while the host
+   *      still thinks their old connection is live. Keying off the device id
+   *      (not the stale online flag) is what makes rejoin actually work and
+   *      keeps a game from stalling on a "present" player who's really gone.
+   *   2. Name match (only when that seat is OFFLINE) — fallback for clients with
+   *      no stored clientId, or a same-name rejoin from a different device.
+   */
+  addPlayer(id, name, { isHost = false, clientId = null } = {}) {
     const trimmed = (name || '').trim();
     if (!trimmed) return { ok: false, error: 'Name required.' };
 
-    // Reconnect: a known name that is currently offline reclaims its seat+role.
-    const existing = this.players.find(
-      p => p.name.toLowerCase() === trimmed.toLowerCase()
-    );
-    if (existing) {
-      if (existing.online) {
-        return { ok: false, error: `The name "${trimmed}" is already taken.` };
+    // (1) Same device reconnecting — match by clientId regardless of online.
+    let existing = clientId
+      ? this.players.find(p => p.clientId && p.clientId === clientId)
+      : null;
+
+    // (2) Fall back to name match, but only reclaim an OFFLINE seat — an online
+    // seat with this name belongs to a different, currently-connected device.
+    if (!existing) {
+      const byName = this.players.find(p => p.name.toLowerCase() === trimmed.toLowerCase());
+      if (byName) {
+        if (byName.online) {
+          return { ok: false, error: `The name "${trimmed}" is already taken.` };
+        }
+        existing = byName;
       }
+    }
+
+    if (existing) {
       const oldId = existing.id;
       existing.online = true;
-      existing.id = id; // new connection id reclaims the seat
+      existing.id = id;                       // new connection id reclaims the seat
+      if (clientId) existing.clientId = clientId; // remember/refresh the device id
+      if (trimmed) existing.name = trimmed;   // honour a (re)typed display name
       if (oldId !== id) this._remapPlayerId(oldId, id); // fix mid-game id-keyed state
       if (isHost) this.hostId = id;
       return { ok: true, player: existing, reconnected: true };
@@ -89,7 +113,7 @@ export class GameEngine {
       return { ok: false, error: 'Game is full (10 players max).' };
     }
 
-    const player = { id, name: trimmed, online: true, roleId: null, ready: false };
+    const player = { id, name: trimmed, online: true, roleId: null, ready: false, clientId: clientId || null };
     this.players.push(player);
     if (isHost) this.hostId = id;
     return { ok: true, player };
