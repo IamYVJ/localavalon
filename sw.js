@@ -12,7 +12,7 @@
 // ============================================================================
 
 // Bump this version to invalidate old caches on the next activate.
-const CACHE = 'localavalon-v24';
+const CACHE = 'localavalon-v26';
 
 // Core app shell (same-origin). Relative to the SW's scope.
 const SHELL = [

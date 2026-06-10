@@ -2,8 +2,9 @@
 // util.js — Small helpers shared across modules. No game logic here.
 // ============================================================================
 
-// Unambiguous alphabet: no O/0, I/1, to keep spoken/typed codes reliable.
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+// Numeric-only codes for now: a 4-digit room code is the simplest thing to
+// read aloud and type on a phone keypad.
+const CODE_ALPHABET = '0123456789';
 const CODE_LENGTH = 4;
 
 export function generateRoomCode() {
@@ -16,14 +17,10 @@ export function generateRoomCode() {
   return code;
 }
 
-/** Normalise user-typed codes: uppercase, strip spaces, map look-alikes. */
+/** Normalise user-typed codes: keep digits only, capped at the code length. */
 export function normalizeCode(raw) {
   return (raw || '')
-    .toUpperCase()
-    .replace(/\s+/g, '')
-    .replace(/O/g, '0').replace(/0/g, '') // remove ambiguous, then drop
-    .replace(/[I1]/g, '')
-    .replace(/[^A-Z0-9]/g, '')
+    .replace(/\D/g, '')
     .slice(0, CODE_LENGTH);
 }
 

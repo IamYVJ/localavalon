@@ -434,7 +434,7 @@ function startJoining(rawCode, rawName, asSpectator = false) {
   // host's logs. Players still must enter a name to claim their seat.
   const effectiveName = asSpectator ? (name || 'Spectator') : name;
   if (!asSpectator && !name) { app.error = 'Enter your name.'; app.screen = 'join'; draw(); return; }
-  if (code.length !== 4) { app.error = 'Enter the full 4-character code.'; app.screen = 'join'; draw(); return; }
+  if (code.length !== 4) { app.error = 'Enter the full 4-digit code.'; app.screen = 'join'; draw(); return; }
 
   stopDiscovery();
   app.me.name = name; if (name) saveName(name);

@@ -71,6 +71,21 @@ export function render(root, app, intents) {
     }, '✕ LEAVE GAME'));
   }
 
+  // Floating room-code chip for non-host players (and spectators): the host sees
+  // the code on their lobby card, but a joined player has no on-screen reminder
+  // once the game starts. Pin it bottom-left (top-right is the exit button,
+  // bottom-centre the reconnect banner) so a player can always read or share it.
+  // Tap to copy.
+  if (!app.me.isHost && app.code && (app.screen === 'game' || app.screen === 'spectator')) {
+    root.appendChild(el('button', {
+      class: 'code-footer', title: 'Room code — tap to copy',
+      onclick: () => intents.copyCode && intents.copyCode(),
+    },
+      el('span', { class: 'code-footer-label' }, 'ROOM'),
+      el('span', { class: 'code-footer-value' }, app.code),
+    ));
+  }
+
   // Confirmation modals ("are you sure?").
   if (app.me.isHost && app.confirmEndGame) {
     root.appendChild(confirmModal({
@@ -183,10 +198,11 @@ function joinScreen(app, intents) {
     oninput: (e) => intents.setName(e.target.value),
   });
   const codeInput = el('input', {
-    class: 'field field-code', type: 'text', maxlength: '4', placeholder: 'CODE',
-    value: app.code || '', autocapitalize: 'characters', autocomplete: 'off',
+    class: 'field field-code', type: 'text', inputmode: 'numeric', pattern: '[0-9]*',
+    maxlength: '4', placeholder: '1234',
+    value: app.code || '', autocomplete: 'off',
     'aria-label': 'Room code',
-    oninput: (e) => { e.target.value = e.target.value.toUpperCase(); },
+    oninput: (e) => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4); },
   });
 
   const spectate = !!app.spectatorMode;
@@ -236,7 +252,7 @@ function discoveryList(app, intents, nameInput) {
   if (state === 'unsupported') {
     return el('p', { class: 'fine' },
       'Automatic discovery isn’t available on the public signaling server — ',
-      'enter the 4-character code the host is showing instead. ',
+      'enter the 4-digit code the host is showing instead. ',
       '(Self-host a PeerServer on your LAN to enable the live list.)');
   }
 

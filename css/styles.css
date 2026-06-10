@@ -846,6 +846,35 @@ body {
 }
 .exit-btn:hover { background: var(--evil-dim); border-color: var(--evil); }
 
+/* Floating room-code reminder for joined players (bottom-left). Top-right is the
+   exit button and bottom-centre the reconnect banner, so this corner is free. */
+.code-footer {
+  position: fixed;
+  left: 14px; bottom: 14px;
+  z-index: 45;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+  transition: border-color 0.15s ease;
+}
+.code-footer:hover { border-color: var(--accent); }
+.code-footer-label {
+  font: 700 10px/1 var(--mono);
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--muted);
+}
+.code-footer-value {
+  font: 700 16px/1 var(--mono);
+  letter-spacing: 0.16em;
+  color: var(--accent);
+}
+
 .modal-overlay {
   position: fixed; inset: 0;
   z-index: 100;
