@@ -27,6 +27,7 @@ export function render(root, app, intents) {
   switch (app.screen) {
     case 'home':       node = homeScreen(app, intents); break;
     case 'join':       node = joinScreen(app, intents); break;
+    case 'howto':      node = howToScreen(app, intents); break;
     case 'connecting': node = infoScreen('Connecting…', `Reaching room ${app.code}.`, true); break;
     case 'error':      node = errorScreen(app, intents); break;
     case 'hostleft':   node = infoScreen('Host left', 'The host ended the game. Thanks for playing.', false,
@@ -184,6 +185,7 @@ function homeScreen(app, intents) {
         hostSpectate ? '▷ HOST AS SPECTATOR' : '> HOST GAME'),
       el('button', { class: 'btn btn-secondary', onclick: () => intents.gotoJoin() }, '▷ JOIN GAME'),
     ),
+    el('button', { class: 'link-btn', onclick: () => intents.gotoHowTo() }, '? How to play'),
     el('p', { class: 'fine' }, 'Plays peer-to-peer in your browser. No accounts, no servers.'),
   );
 }
@@ -240,8 +242,111 @@ function joinScreen(app, intents) {
       }, spectate ? '▷ WATCH' : '> CONNECT'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '‹ BACK'),
     ),
+    el('button', { class: 'link-btn', onclick: () => intents.gotoHowTo() }, '? How to play'),
   ];
   return shell(...children);
+}
+
+// ---------------------------------------------------------------------------
+// HOW TO PLAY
+// ---------------------------------------------------------------------------
+function howToScreen(app, intents) {
+  // A self-contained rules primer. Pure static content — no game state needed.
+  const step = (n, title, ...body) =>
+    el('li', { class: 'howto-step' },
+      el('span', { class: 'howto-step-num' }, String(n)),
+      el('div', { class: 'howto-step-body' },
+        el('h3', { class: 'howto-step-title' }, title),
+        ...body));
+
+  const role = (name, team, desc) =>
+    el('li', { class: 'howto-role howto-role-' + team },
+      el('span', { class: 'howto-role-name' }, name),
+      el('span', { class: 'howto-role-desc' }, desc));
+
+  return shell(
+    wordmark(),
+    el('h1', { class: 'hero hero-sm' }, 'How to play'),
+    el('p', { class: 'tagline' },
+      'Avalon is a game of ', el('span', { class: 'accent' }, 'hidden roles'),
+      ' for 5–10 players. Everyone is secretly ', el('span', { class: 'good' }, 'Good'),
+      ' or ', el('span', { class: 'evil' }, 'Evil'), '.'),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'THE GOAL'),
+      el('p', { class: 'howto-text' },
+        'Good wins by succeeding ', el('strong', {}, '3 of 5 Quests'),
+        '. Evil wins by failing 3 Quests — or, at the very end, by ',
+        el('strong', {}, 'assassinating Merlin'), '. Evil knows who each other are; '
+        + 'Good must work it out from how people vote and play.'),
+    ),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'A ROUND, STEP BY STEP'),
+      el('ol', { class: 'howto-steps' },
+        step(1, 'A leader proposes a team',
+          el('p', { class: 'howto-text' },
+            'The leader picks players to go on the Quest. The number needed is set by the '
+            + 'board for the current round and player count.')),
+        step(2, 'Everyone votes on the team',
+          el('p', { class: 'howto-text' },
+            'All players simultaneously Approve or Reject the proposed team. A majority '
+            + 'Approve sends it on the Quest; otherwise leadership passes to the next player '
+            + 'and a new team is proposed. ',
+            el('strong', {}, 'Five rejected proposals in one round = Evil wins that Quest.'))),
+        step(3, 'The team goes on the Quest',
+          el('p', { class: 'howto-text' },
+            'Only the chosen team members secretly play a card: ',
+            el('span', { class: 'good' }, 'Success'), ' or ', el('span', { class: 'evil' }, 'Fail'),
+            '. Good players must play Success. Evil players may play either. ',
+            'Cards are shuffled, so you see the count but not who played what.')),
+        step(4, 'Resolve the Quest',
+          el('p', { class: 'howto-text' },
+            'One Fail card usually fails the Quest. (With 7+ players, the 4th Quest needs '
+            + 'two Fails.) Then the next round begins with a new leader.')),
+      ),
+    ),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'WINNING'),
+      el('p', { class: 'howto-text' },
+        'First side to ', el('strong', {}, '3 Quests'), ' wins the board. But if Good reaches 3, '
+        + 'Evil gets one last chance: the ', el('span', { class: 'evil' }, 'Assassin'),
+        ' names the player they think is ', el('span', { class: 'good' }, 'Merlin'),
+        '. Guess right and Evil steals the win.'),
+    ),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'SPECIAL ROLES'),
+      el('ul', { class: 'howto-roles' },
+        role('Merlin', 'good', 'Knows who the Evil players are — but must stay hidden, or the Assassin will find them.'),
+        role('Percival', 'good', 'Sees Merlin (and Morgana) but can\'t tell which is which.'),
+        role('Loyal Servant', 'good', 'No special knowledge — just vote and play wisely.'),
+        role('Assassin', 'evil', 'At the end, picks who to assassinate. Killing Merlin wins the game for Evil.'),
+        role('Morgana', 'evil', 'Appears to Percival as Merlin, sowing doubt.'),
+        role('Mordred', 'evil', 'Hidden from Merlin — Good\'s seer never sees them.'),
+        role('Oberon', 'evil', 'Evil, but unknown to the other Evil players (and they\'re unknown to Oberon).'),
+        role('Minion of Mordred', 'evil', 'Plain Evil — knows the other Evil players.'),
+      ),
+      el('p', { class: 'fine' }, 'The host picks which roles are in play before each game. '
+        + 'Some setups add advanced roles (Cleric, Lancelot, Lunatic and more) — when you have one, '
+        + 'your private role card explains exactly what it does.'),
+    ),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'TIPS'),
+      el('ul', { class: 'howto-tips' },
+        el('li', {}, 'Watch who proposes and approves teams — patterns reveal sides.'),
+        el('li', {}, 'A surprise Fail tells you an Evil player was on that team.'),
+        el('li', {}, 'If you\'re Merlin, hint carefully — being too obviously informed gets you assassinated.'),
+        el('li', {}, 'Talk! The real game happens in the discussion between rounds.'),
+      ),
+    ),
+
+    el('div', { class: 'btn-row' },
+      el('button', { class: 'btn btn-primary', onclick: () => intents.backFromHowTo() }, '‹ BACK'),
+    ),
+  );
 }
 
 // The auto-discovered list of open games (or an explanatory fallback).

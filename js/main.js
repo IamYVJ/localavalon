@@ -619,6 +619,10 @@ function sendIntent(msg) {
 const intents = {
   setName: (n) => { app.me.name = n; saveName(n); },
   gotoJoin: () => { app.screen = 'join'; app.error = ''; startDiscovery(); draw(); },
+  // How-to-play: remember where we came from so the back button returns there
+  // (the link lives on both the home and join screens).
+  gotoHowTo: () => { app._howToFrom = app.screen; app.screen = 'howto'; draw(); },
+  backFromHowTo: () => { app.screen = app._howToFrom || 'home'; draw(); },
   goHome: () => {
     teardownNet();
     stopDiscovery();

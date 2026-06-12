@@ -875,6 +875,91 @@ body {
   color: var(--accent);
 }
 
+/* Inline good/evil text colour utilities (used in prose, e.g. How to play). */
+.good { color: var(--accent); }
+.evil { color: var(--evil); }
+
+/* Quiet text link/button (e.g. "How to play"). */
+.link-btn {
+  display: inline-block;
+  margin: 4px auto 0;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: 600 14px/1 var(--sans);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.link-btn:hover { color: var(--accent); }
+
+/* How to play -------------------------------------------------------------- */
+.howto-section { margin-top: 26px; }
+.howto-text { color: var(--text); font-size: 15px; line-height: 1.6; margin: 8px 0 0; }
+.howto-text strong { color: var(--text); font-weight: 700; }
+
+.howto-steps {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.howto-step { display: flex; gap: 14px; align-items: flex-start; }
+.howto-step-num {
+  flex: 0 0 auto;
+  width: 30px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font: 700 15px/1 var(--mono);
+}
+.howto-step-body { flex: 1 1 auto; min-width: 0; }
+.howto-step-title {
+  margin: 4px 0 0;
+  font: 700 16px/1.3 var(--sans);
+  color: var(--text);
+}
+
+.howto-roles {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.howto-role {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--border-soft);
+}
+.howto-role-good { border-left-color: var(--accent); }
+.howto-role-evil { border-left-color: var(--evil); }
+.howto-role-name {
+  display: block;
+  font: 700 14px/1.2 var(--mono);
+  letter-spacing: 0.04em;
+  margin-bottom: 3px;
+}
+.howto-role-good .howto-role-name { color: var(--accent); }
+.howto-role-evil .howto-role-name { color: var(--evil); }
+.howto-role-desc { color: var(--muted); font-size: 14px; line-height: 1.5; }
+
+.howto-tips {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.6;
+}
+.howto-tips li { margin-top: 6px; }
+
 .modal-overlay {
   position: fixed; inset: 0;
   z-index: 100;
