@@ -49,6 +49,47 @@ ok(!validateRoleConfig({ merlin: 2, assassin: 1, servant: 1, minion: 1 }, 5).ok,
   eq(assassinSees, ['c', 'e'], 'Assassin (evil) sees fellow evil Mordred+Morgana');
 }
 {
+  // Percival with NO Morgana (e.g. Mordred-only Evil): the single name shown is
+  // the confirmed Merlin, and the label/note must say so — not "which is which".
+  const players = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'mordred' },
+    { id: 'd', name: 'D', roleId: 'percival' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  const k = computeKnowledge(players[3], players);
+  eq(k.sees.map(s => s.id), ['a'], 'Percival without Morgana sees only Merlin');
+  ok(/confirmed/i.test(k.seesLabel), 'Percival label says Merlin is confirmed when no Morgana');
+  ok(!/which is which/i.test(k.seesLabel), 'Percival label drops the decoy phrasing when no Morgana');
+}
+{
+  // Merlin's label must not claim Mordred is hidden when no Mordred is in play.
+  const players = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'servant' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  const km = computeKnowledge(players[0], players);
+  ok(!/mordred/i.test(km.seesLabel), 'Merlin label drops "(Mordred hidden)" when no Mordred');
+  eq(km.sees.map(s => s.id), ['b'], 'Merlin still sees the Assassin when no Mordred');
+}
+{
+  // With Mordred present, Merlin's label DOES note the hidden Mordred.
+  const players = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'mordred' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  const km = computeKnowledge(players[0], players);
+  ok(/mordred/i.test(km.seesLabel), 'Merlin label notes hidden Mordred when present');
+  eq(km.sees.map(s => s.id).sort(), ['b'], 'Merlin sees Assassin but not the hidden Mordred');
+}
+{
   // Oberon isolation.
   const players = [
     { id: 'a', name: 'A', roleId: 'assassin' },
@@ -218,6 +259,16 @@ ok(!validateRoleConfig({ merlin: 1, assassin: 1, tristan: 1, servant: 1, minion:
 ok(validateRoleConfig({ merlin: 1, assassin: 1, tristan: 1, isolde: 1, servant: 1, minion: 2 }, 7).ok, 'Lovers config valid for 7p');
 ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3 }, 7).ok, 'Lunatic+Brute config valid for 7p');
 
+// validateRoleConfig: Percival without Morgana is now a soft warning, not a hard block.
+{
+  const v = validateRoleConfig({ merlin: 1, assassin: 1, percival: 1, servant: 1, minion: 1 }, 5);
+  ok(v.ok, 'Percival without Morgana is allowed (soft warning)');
+  ok(v.warnings.length === 1, 'Percival without Morgana produces a warning');
+  // With Morgana present, no such warning.
+  const v2 = validateRoleConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 }, 5);
+  ok(v2.ok && v2.warnings.length === 0, 'Percival WITH Morgana has no warning');
+}
+
 {
   // Lunatic must Fail; Brute may only Fail on quests 1-3.
   const e = new GameEngine();
@@ -305,6 +356,306 @@ ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3
   ok(e.proposal.members.includes('newconn-xyz') && !e.proposal.members.includes('p1'),
      'proposal members remapped to new id');
   eq(e.privateStateFor('newconn-xyz').hasVoted, true, 'reconnected player still counted as voted');
+}
+
+// --- Cleric: learns the first Quest Leader's loyalty ----------------------
+{
+  const players = [
+    { id: 'a', name: 'A', roleId: 'cleric' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'merlin' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  // First leader is the Assassin (evil).
+  const evilLeader = computeKnowledge(players[0], players, { firstLeaderId: 'b' });
+  eq(evilLeader.sees.map(s => s.id), ['b'], 'Cleric sees the first leader');
+  ok(/EVIL/.test(evilLeader.seesLabel), 'Cleric told first leader is EVIL');
+  // First leader is a Servant (good).
+  const goodLeader = computeKnowledge(players[0], players, { firstLeaderId: 'd' });
+  ok(/GOOD/.test(goodLeader.seesLabel), 'Cleric told first leader is GOOD');
+  // No leader info yet -> graceful fallback, no leak.
+  eq(computeKnowledge(players[0], players).sees, [], 'Cleric without leader info sees nobody');
+
+  // End-to-end: startGame fixes firstLeaderId and the Cleric's reveal matches.
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, cleric: 1, servant: 1, minion: 1 });
+  ok(e.startGame().ok, 'startGame with Cleric ok');
+  ok(e.firstLeaderId === e.players[e.leaderIndex].id, 'firstLeaderId captured at start');
+  const cleric = e.players.find(p => p.roleId === 'cleric');
+  const leaderRole = ROLES[e.getPlayer(e.firstLeaderId).roleId].team;
+  const reveal = e.privateStateFor(cleric.id).knowledge;
+  ok(reveal.seesLabel.includes(leaderRole === 'evil' ? 'EVIL' : 'GOOD'),
+     'Cleric private reveal matches first leader loyalty');
+  // firstLeaderId survives serialize/restore.
+  const r = new GameEngine(); r.restore(e.serialize());
+  eq(r.firstLeaderId, e.firstLeaderId, 'firstLeaderId survives restore');
+}
+
+// --- Untrustworthy Servant: Good, but appears Evil to Merlin ---------------
+{
+  const players = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'untrustworthy' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'servant' },
+  ];
+  const merlinSees = computeKnowledge(players[0], players).sees.map(s => s.id).sort();
+  eq(merlinSees, ['b', 'c'], 'Merlin sees Assassin AND the Untrustworthy Servant');
+  eq(ROLES.untrustworthy.team, 'good', 'Untrustworthy Servant is on the Good team');
+  // The assassin (evil) does NOT see the Untrustworthy Servant as a teammate.
+  ok(!computeKnowledge(players[1], players).sees.map(s => s.id).includes('c'),
+     'Evil does not see the Untrustworthy Servant');
+}
+
+// --- Lancelots: Good Lancelot may Fail; must be paired ---------------------
+{
+  ok(!validateRoleConfig({ merlin: 1, assassin: 1, lancelotGood: 1, servant: 1, minion: 1 }, 5).ok,
+     'Good Lancelot without Evil Lancelot rejected');
+  ok(validateRoleConfig({ merlin: 1, assassin: 1, lancelotGood: 1, lancelotEvil: 1, servant: 2, minion: 1 }, 7).ok,
+     'Paired Lancelots config valid for 7p');
+
+  const e = new GameEngine();
+  seat(e, ['A', 'B', 'C', 'D', 'E']);
+  e.phase = PHASES.QUEST;
+  e.players[0].roleId = 'lancelotGood';
+  e.players[1].roleId = 'servant';
+  e.players[2].roleId = 'merlin';
+  e.players[3].roleId = 'lancelotEvil';
+  e.players[4].roleId = 'assassin';
+  e.questIndex = 0;
+  e.proposal = { leaderId: 'p0', members: ['p0', 'p1'] };
+  e.questCards = {};
+  ok(e.playQuestCard('p0', false).ok, 'Good Lancelot may play Fail');
+  ok(!e.playQuestCard('p1', false).ok, 'A plain Good Servant still cannot Fail');
+  eq(e.privateStateFor('p0').mayFail, true, 'Good Lancelot mayFail flag set');
+}
+
+// --- Proposal timer (host option) -----------------------------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+
+  // Off by default; clamps the chosen duration to the 1-5 minute window.
+  ok(!e.questTimerEnabled, 'timer off by default');
+  e.setQuestTimer(true, 30);   eq(e.questTimerSeconds, 60,  'clamps below 1 min up to 60s');
+  e.setQuestTimer(true, 600);  eq(e.questTimerSeconds, 300, 'clamps above 5 min down to 300s');
+  e.setQuestTimer(true, 180);  eq(e.questTimerSeconds, 180, 'accepts an in-range duration');
+
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  eq(e.phase, PHASES.PROPOSAL, 'reached proposal');
+
+  // Entering proposal arms a deadline; publicState exposes a positive remaining span.
+  ok(e.proposalDeadline != null, 'proposal arms a deadline when timer enabled');
+  const rem = e.publicState().proposalRemainingMs;
+  ok(rem != null && rem > 0 && rem <= 180000, `remaining span within bounds (got ${rem})`);
+
+  // Timing out passes leadership WITHOUT touching the reject track.
+  const beforeLeader = e.leader.id;
+  const beforeRejects = e.rejectCount;
+  const t = e.proposalTimedOut();
+  ok(t.ok, 'proposalTimedOut applies in proposal phase');
+  eq(e.phase, PHASES.PROPOSAL, 'still in proposal after timeout');
+  ok(e.leader.id !== beforeLeader, 'timeout advances leadership');
+  eq(e.rejectCount, beforeRejects, 'timeout does NOT count as a reject');
+
+  // Confirming a team stops the countdown; remaining span goes null off-phase.
+  const need = teamSize(5, e.questIndex);
+  e.proposeTeam(e.leader.id, e.players.slice(0, need).map(p => p.id));
+  eq(e.proposalDeadline, null, 'confirming a team clears the deadline');
+  eq(e.publicState().proposalRemainingMs, null, 'no remaining span outside proposal');
+
+  // proposalTimedOut is a no-op outside the proposal phase.
+  ok(!e.proposalTimedOut().ok, 'timeout ignored when not proposing');
+}
+
+// --- Proposal timer survives serialize/restore ----------------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.setQuestTimer(true, 240);
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+
+  const e2 = new GameEngine();
+  e2.restore(e.serialize());
+  ok(e2.questTimerEnabled, 'timer-enabled flag round-trips');
+  eq(e2.questTimerSeconds, 240, 'timer duration round-trips');
+  // A reload mid-proposal refreshes the deadline rather than restoring a stale one.
+  ok(e2.proposalDeadline != null && e2.proposalDeadline > Date.now(), 'restore refreshes a live proposal deadline');
+
+  // playAgain keeps the host's timer preference.
+  e.playAgain();
+  ok(e.questTimerEnabled && e.questTimerSeconds === 240, 'playAgain preserves timer settings');
+}
+
+// --- Host "end game" mid-round returns to a clean lobby --------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  const cfg = { merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 };
+  e.setConfig(cfg);
+  e.setAllowReveal(true);
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  // Drive a couple of rounds so there's real mid-game state to discard.
+  e.proposeTeam(e.leader.id, e.players.slice(0, teamSize(5, 0)).map(p => p.id));
+  e.castVote('p0', true); e.castVote('p1', true); e.castVote('p2', true);
+  e.castVote('p3', false); e.castVote('p4', false);
+  e.acknowledgeVote();
+  ok(e.phase === PHASES.QUEST, 'reached a quest mid-game');
+
+  // End the game at this point.
+  e.endGame();
+  eq(e.phase, PHASES.LOBBY, 'endGame returns to the lobby');
+  eq(e.count, 5, 'endGame keeps all seated players');
+  eq(e.config, cfg, 'endGame preserves the role config');
+  ok(e.allowReveal === true, 'endGame preserves game options');
+  ok(e.players.every(p => p.roleId === null && p.ready === false), 'endGame clears roles + ready flags');
+  eq(e.questResults, [null, null, null, null, null], 'endGame clears quest results');
+  eq(e.rejectCount, 0, 'endGame clears the reject track');
+  ok(e.proposal === null && e.winner === null, 'endGame clears proposal + winner');
+  // A fresh game can be started straight away.
+  ok(e.startGame().ok, 'can start a new game after endGame');
+}
+
+// --- Player leaves mid-game and rejoins with the same name -----------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']); // p2's name is 'C'
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  const role = e.getPlayer('p2').roleId;
+
+  // p2 leaves: the host marks them offline on disconnect.
+  e.markOffline('p2');
+  eq(e.count, 5, 'leaving mid-game keeps the seat (held offline)');
+  ok(!e.getPlayer('p2').online, 'left player is marked offline, not removed');
+
+  // Rejoin from a fresh connection id but the SAME name reclaims the seat+role.
+  const r = e.addPlayer('p2-new', 'C');
+  ok(r.ok && r.reconnected, 'rejoin by same name reclaims the seat');
+  eq(e.count, 5, 'rejoin does not create a duplicate seat');
+  const after = e.getPlayer('p2-new');
+  ok(after && after.online, 'rejoined player is back online');
+  eq(after && after.roleId, role, 'rejoined player keeps their original role');
+  ok(!e.getPlayer('p2'), 'the stale connection id is gone after the id remap');
+
+  // Contrast: leaving during the LOBBY frees the seat entirely (clean roster).
+  const e2 = new GameEngine();
+  seat(e2, ['Host', 'B', 'C']);
+  e2.markOffline('p2');
+  eq(e2.count, 2, 'leaving in the lobby drops the seat');
+}
+
+// --- Reconnect by clientId even when the stale seat still looks online ------
+// On mobile, WebRTC is slow to detect a dropped channel, so the host often
+// still shows a disconnected player's seat as `online` when they reconnect.
+// A persistent per-device clientId must reclaim the seat anyway — otherwise the
+// name-only path rejects ("name already taken") and the player is locked out.
+{
+  const e = new GameEngine();
+  // Seat with explicit clientIds so we can reclaim by device id.
+  e.addPlayer('p0', 'Host', { isHost: true, clientId: 'dev-host' });
+  e.addPlayer('p1', 'B', { clientId: 'dev-b' });
+  e.addPlayer('p2', 'C', { clientId: 'dev-c' });
+  e.addPlayer('p3', 'D', { clientId: 'dev-d' });
+  e.addPlayer('p4', 'E', { clientId: 'dev-e' });
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  const role = e.getPlayer('p2').roleId;
+
+  // The seat is STILL online (host hasn't detected the drop yet).
+  ok(e.getPlayer('p2').online, 'stale seat still appears online (mobile case)');
+
+  // Same device, new connection id: clientId reclaims despite the online flag.
+  const r = e.addPlayer('p2-new', 'C', { clientId: 'dev-c' });
+  ok(r.ok && r.reconnected, 'clientId reclaims an online seat (same device)');
+  eq(e.count, 5, 'clientId reclaim does not create a duplicate seat');
+  eq(e.getPlayer('p2-new') && e.getPlayer('p2-new').roleId, role, 'role preserved on clientId reclaim');
+  ok(!e.getPlayer('p2'), 'old connection id is gone after clientId remap');
+
+  // A DIFFERENT device using a taken, still-online name is still rejected.
+  const r2 = e.addPlayer('intruder', 'C', { clientId: 'dev-other' });
+  ok(!r2.ok, 'a different device cannot steal an online name');
+
+  // Retyped display name is honoured on a clientId reclaim.
+  const r3 = e.addPlayer('p2-newer', 'Charlie', { clientId: 'dev-c' });
+  ok(r3.ok && r3.reconnected, 'clientId reclaim works after id changed again');
+  eq(e.getPlayer('p2-newer') && e.getPlayer('p2-newer').name, 'Charlie', 'retyped name honoured on reclaim');
+}
+
+// --- Show-pending-voters option -------------------------------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+
+  ok(!e.showPendingVoters, 'pending-voters off by default');
+  eq(e.publicState().showPendingVoters, false, 'flag exposed in publicState (off)');
+  e.setShowPendingVoters(true);
+  eq(e.publicState().showPendingVoters, true, 'flag exposed in publicState (on)');
+
+  e.startGame();
+  e.players.forEach(p => e.setReady(p.id));
+  e.proposeTeam(e.leader.id, e.players.slice(0, teamSize(5, 0)).map(p => p.id));
+  eq(e.phase, PHASES.VOTE, 'reached vote phase');
+
+  // Two of five have voted: voteProgress marks exactly those, names resolvable.
+  e.castVote('p0', true);
+  e.castVote('p1', false);
+  const prog = e.publicState().voteProgress;
+  eq(prog.filter(x => x.voted).length, 2, 'voteProgress reflects 2 votes cast');
+  eq(prog.filter(x => !x.voted).map(x => x.id).sort(), ['p2', 'p3', 'p4'], 'pending ids are the non-voters');
+
+  // Round-trips through serialize/restore and survives playAgain.
+  const e2 = new GameEngine();
+  e2.restore(e.serialize());
+  ok(e2.showPendingVoters, 'pending-voters flag round-trips');
+  e2.playAgain();
+  ok(e2.showPendingVoters, 'playAgain preserves pending-voters flag');
+}
+
+// --- Spectator privacy contract --------------------------------------------
+// A spectator is never seated (no addPlayer), so the host derives their state
+// from publicState() + privateStateFor(theirConnId). This locks in the two
+// guarantees the spectator view relies on: an unseated id gets NO private slice,
+// and mid-game publicState() never leaks roles/teams.
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.startGame();
+
+  eq(e.privateStateFor('spectator-conn'), null, 'unseated id gets null private state');
+  e.markOffline('spectator-conn'); // must be a harmless no-op for a non-player
+  eq(e.count, 5, 'spectator id never affects player count');
+
+  const pubReveal = e.publicState();
+  ok(pubReveal.players.every(p => !('roleId' in p) && !('team' in p) && !('role' in p)),
+    'mid-game publicState exposes no roles/teams (safe for spectators)');
+  eq(pubReveal.reveal, undefined, 'no full reveal before game over');
+
+  // After game over the reveal becomes public — spectators may then see roles.
+  e.players.forEach(p => e.setReady(p.id));
+  for (let q = 0; q < 3; q++) {
+    const need = teamSize(5, e.questIndex);
+    e.proposeTeam(e.leader.id, e.players.slice(0, need).map(p => p.id));
+    approveAll(e);
+    runQuestAllSuccess(e);
+  }
+  // Good completed 3 quests → assassination; a wrong guess ends the game.
+  const wrong = e.players.find(p => p.roleId !== 'merlin' && ROLES[p.roleId].team === 'good');
+  e.assassinate(e.players.find(p => p.roleId === 'assassin').id, wrong.id);
+  eq(e.phase, PHASES.GAMEOVER, 'game reached game over');
+  ok(Array.isArray(e.publicState().reveal), 'full reveal present at game over');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

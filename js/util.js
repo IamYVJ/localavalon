@@ -2,8 +2,9 @@
 // util.js — Small helpers shared across modules. No game logic here.
 // ============================================================================
 
-// Unambiguous alphabet: no O/0, I/1, to keep spoken/typed codes reliable.
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+// Numeric-only codes for now: a 4-digit room code is the simplest thing to
+// read aloud and type on a phone keypad.
+const CODE_ALPHABET = '0123456789';
 const CODE_LENGTH = 4;
 
 export function generateRoomCode() {
@@ -16,14 +17,10 @@ export function generateRoomCode() {
   return code;
 }
 
-/** Normalise user-typed codes: uppercase, strip spaces, map look-alikes. */
+/** Normalise user-typed codes: keep digits only, capped at the code length. */
 export function normalizeCode(raw) {
   return (raw || '')
-    .toUpperCase()
-    .replace(/\s+/g, '')
-    .replace(/O/g, '0').replace(/0/g, '') // remove ambiguous, then drop
-    .replace(/[I1]/g, '')
-    .replace(/[^A-Z0-9]/g, '')
+    .replace(/\D/g, '')
     .slice(0, CODE_LENGTH);
 }
 
@@ -56,6 +53,31 @@ export function loadName()  { try { return localStorage.getItem(NAME_KEY) || '';
 export function saveName(n) { try { localStorage.setItem(NAME_KEY, n); } catch (_) {} }
 export function loadCode()  { try { return localStorage.getItem(CODE_KEY) || ''; } catch (_) { return ''; } }
 export function saveCode(c) { try { localStorage.setItem(CODE_KEY, c); } catch (_) {} }
+
+// --- Stable per-device client id ------------------------------------------
+// A persistent, anonymous identifier for THIS device/browser, generated once
+// and reused forever. It is sent with the join message so the host can reclaim
+// a seat for a reconnecting player even when their old connection still looks
+// "online" (mobile WebRTC is slow to detect a dropped channel). This is what
+// makes "rejoin with the same name, device, and code" reliable. It is never
+// shown in the UI and never broadcast to other players.
+const CLIENT_KEY = 'localavalon.clientId';
+export function loadClientId() {
+  try {
+    let id = localStorage.getItem(CLIENT_KEY);
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'c-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+      localStorage.setItem(CLIENT_KEY, id);
+    }
+    return id;
+  } catch (_) {
+    // Storage unavailable (private mode): a per-session id still helps within
+    // this page's lifetime, though it won't survive a full reload.
+    return 'c-' + Math.random().toString(36).slice(2);
+  }
+}
 
 // --- Session resume (reload / rejoin returns to the same game) -------------
 // We remember whether this device was hosting or joining, the room code, and

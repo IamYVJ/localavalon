@@ -15,20 +15,119 @@ import { ROLES, ROLE_COUNTS, validateRoleConfig, OPTIONAL_TOGGLES, MIN_PLAYERS, 
 // Filler roles that automatically occupy the remaining seats (not toggleable).
 const FILLER_ROLE_IDS = ['servant', 'minion'];
 
+// The last top-level screen we rendered. The entrance animation (a fade-in from
+// opacity 0) should play ONLY when the screen actually changes — replaying it on
+// every state push / repaint makes the whole screen flicker. We compare against
+// this and add the `screen-enter` class only on a real transition.
+let _lastScreen = null;
+
 export function render(root, app, intents) {
   clear(root);
   let node;
   switch (app.screen) {
     case 'home':       node = homeScreen(app, intents); break;
     case 'join':       node = joinScreen(app, intents); break;
+    case 'howto':      node = howToScreen(app, intents); break;
     case 'connecting': node = infoScreen('Connecting…', `Reaching room ${app.code}.`, true); break;
     case 'error':      node = errorScreen(app, intents); break;
     case 'hostleft':   node = infoScreen('Host left', 'The host ended the game. Thanks for playing.', false,
                                           el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '> BACK HOME')); break;
     case 'game':       node = gameScreen(app, intents); break;
+    case 'spectator':  node = spectatorScreen(app, intents); break;
+    case 'stats':      node = statsScreen(app, intents); break;
     default:           node = homeScreen(app, intents);
   }
+  // Animate on screen change only — not on every in-screen re-render.
+  if (app.screen !== _lastScreen) {
+    node.classList.add('screen-enter');
+    _lastScreen = app.screen;
+  }
   root.appendChild(node);
+
+  // Connection-recovery banner: shown over any screen while the peer link is
+  // being re-established (e.g. the host briefly backgrounded their browser).
+  if (app.netStatus === 'reconnecting') {
+    root.appendChild(el('div', { class: 'reconnect-banner', role: 'status', 'aria-live': 'polite' },
+      el('span', { class: 'reconnect-dot' }),
+      'Reconnecting…',
+    ));
+  }
+
+  // Floating exit control during active play (any phase past the lobby, before
+  // game-over — game-over already has its own buttons). The HOST gets "End game"
+  // (ends for everyone); every other PLAYER gets "Leave game" (just themselves).
+  // It overlays both the game board and a spectating host's TV view.
+  const inActiveGame = app.pub && app.pub.phase !== 'lobby' && app.pub.phase !== 'gameover';
+  if (app.me.isHost && inActiveGame) {
+    root.appendChild(el('button', {
+      class: 'exit-btn',
+      title: 'End the game and send everyone back to the lobby',
+      onclick: () => intents.requestEndGame(),
+    }, '✕ END GAME'));
+  } else if (!app.me.isHost && !app.me.isSpectator && app.me.id && inActiveGame) {
+    root.appendChild(el('button', {
+      class: 'exit-btn',
+      title: 'Leave the game (you can rejoin with the same name and code)',
+      onclick: () => intents.requestLeaveGame(),
+    }, '✕ LEAVE GAME'));
+  }
+
+  // Floating room-code chip for non-host players (and spectators): the host sees
+  // the code on their lobby card, but a joined player has no on-screen reminder
+  // once the game starts. Pin it bottom-left (top-right is the exit button,
+  // bottom-centre the reconnect banner) so a player can always read or share it.
+  // Tap to copy.
+  if (!app.me.isHost && app.code && (app.screen === 'game' || app.screen === 'spectator')) {
+    root.appendChild(el('button', {
+      class: 'code-footer', title: 'Room code — tap to copy',
+      onclick: () => intents.copyCode && intents.copyCode(),
+    },
+      el('span', { class: 'code-footer-label' }, 'ROOM'),
+      el('span', { class: 'code-footer-value' }, app.code),
+    ));
+  }
+
+  // Confirmation modals ("are you sure?").
+  if (app.me.isHost && app.confirmEndGame) {
+    root.appendChild(confirmModal({
+      title: 'End this game?',
+      body: 'This ends the current game for everyone and returns all players to the lobby. '
+          + 'The current roles and quest progress will be lost — but everyone stays connected, '
+          + 'so you can set up and start a new game right away.',
+      confirmLabel: '✕ END GAME',
+      onConfirm: () => intents.endGame(),
+      onCancel: () => intents.cancelEndGame(),
+    }));
+  }
+  if (!app.me.isHost && app.confirmLeaveGame) {
+    root.appendChild(confirmModal({
+      title: 'Leave the game?',
+      body: 'You\'ll return to the home screen. While the game is in progress your seat is held, '
+          + 'so you can rejoin from this device — just enter the same name and room code to '
+          + 'reclaim your spot and role.',
+      confirmLabel: '✕ LEAVE GAME',
+      onConfirm: () => intents.leaveGame(),
+      onCancel: () => intents.cancelLeaveGame(),
+    }));
+  }
+}
+
+// Generic "are you sure?" overlay. Clicking the backdrop cancels.
+function confirmModal({ title, body, confirmLabel, confirmClass = 'btn-danger', onConfirm, onCancel }) {
+  const overlay = el('div', {
+    class: 'modal-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': title,
+  },
+    el('div', { class: 'modal' },
+      el('h2', { class: 'modal-title' }, title),
+      el('p', { class: 'modal-body' }, body),
+      el('div', { class: 'btn-row' },
+        el('button', { class: 'btn ' + confirmClass, onclick: onConfirm }, confirmLabel),
+        el('button', { class: 'btn btn-secondary', onclick: onCancel }, 'CANCEL'),
+      ),
+    ),
+  );
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) onCancel(); });
+  return overlay;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +156,22 @@ function homeScreen(app, intents) {
     oninput: (e) => intents.setName(e.target.value),
   });
 
+  // When on, the host runs the room but takes NO seat — they never get a role
+  // and don't count toward the player total. Instead they watch the single-screen
+  // TV view, ideal for running the game from a shared display.
+  const hostSpectate = !!app.spectatorMode;
+  const spectatorToggle = el('label', { class: 'toggle spectator-toggle' + (hostSpectate ? ' on' : '') },
+    el('input', {
+      type: 'checkbox', ...(hostSpectate ? { checked: true } : {}),
+      onchange: () => intents.toggleSpectatorMode(),
+    }),
+    el('span', { class: 'toggle-box' }),
+    el('span', { class: 'toggle-text' },
+      el('span', { class: 'toggle-name' }, 'Host as spectator (TV mode)'),
+      el('span', { class: 'toggle-blurb' }, 'Run the game and watch on a shared screen without taking a seat — everyone else joins from their own phone.'),
+    ),
+  );
+
   return shell(
     wordmark(),
     el('h1', { class: 'hero' }, 'Avalon'),
@@ -64,10 +179,13 @@ function homeScreen(app, intents) {
       'A game of ', el('span', { class: 'accent' }, 'loyalty and betrayal'),
       '. Gather 5–10 players on the same Wi-Fi, each on their own phone, and find the spy among you.'),
     el('div', { class: 'field-group' }, nameInput),
+    el('div', { class: 'toggle-list' }, spectatorToggle),
     el('div', { class: 'btn-row' },
-      el('button', { class: 'btn btn-primary', onclick: () => intents.host() }, '> HOST GAME'),
+      el('button', { class: 'btn btn-primary', onclick: () => intents.host() },
+        hostSpectate ? '▷ HOST AS SPECTATOR' : '> HOST GAME'),
       el('button', { class: 'btn btn-secondary', onclick: () => intents.gotoJoin() }, '▷ JOIN GAME'),
     ),
+    el('button', { class: 'link-btn', onclick: () => intents.gotoHowTo() }, '? How to play'),
     el('p', { class: 'fine' }, 'Plays peer-to-peer in your browser. No accounts, no servers.'),
   );
 }
@@ -82,17 +200,35 @@ function joinScreen(app, intents) {
     oninput: (e) => intents.setName(e.target.value),
   });
   const codeInput = el('input', {
-    class: 'field field-code', type: 'text', maxlength: '4', placeholder: 'CODE',
-    value: app.code || '', autocapitalize: 'characters', autocomplete: 'off',
+    class: 'field field-code', type: 'text', inputmode: 'numeric', pattern: '[0-9]*',
+    maxlength: '4', placeholder: '1234',
+    value: app.code || '', autocomplete: 'off',
     'aria-label': 'Room code',
-    oninput: (e) => { e.target.value = e.target.value.toUpperCase(); },
+    oninput: (e) => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4); },
   });
+
+  const spectate = !!app.spectatorMode;
+
+  // Watch-only spectator toggle. A spectator sees only public game info (never
+  // roles) on a single TV-optimised screen — ideal for a shared display.
+  const spectatorToggle = el('label', { class: 'toggle spectator-toggle' + (spectate ? ' on' : '') },
+    el('input', {
+      type: 'checkbox', ...(spectate ? { checked: true } : {}),
+      onchange: () => intents.toggleSpectatorMode(),
+    }),
+    el('span', { class: 'toggle-box' }),
+    el('span', { class: 'toggle-text' },
+      el('span', { class: 'toggle-name' }, 'Watch as spectator (TV mode)'),
+      el('span', { class: 'toggle-blurb' }, 'A single-screen public view for a shared display — no roles, no controls. You can watch a game that\'s already in progress.'),
+    ),
+  );
 
   const children = [
     wordmark(),
-    el('h1', { class: 'hero hero-sm' }, 'Join a game'),
+    el('h1', { class: 'hero hero-sm' }, spectate ? 'Watch a game' : 'Join a game'),
     el('p', { class: 'tagline' }, 'Pick a game on your ', el('span', { class: 'accent' }, 'Wi-Fi'), ' — or enter a code.'),
-    el('div', { class: 'field-group' }, nameInput),
+    spectate ? null : el('div', { class: 'field-group' }, nameInput),
+    el('div', { class: 'toggle-list' }, spectatorToggle),
     el('div', { class: 'section-label' }, 'GAMES ON THIS NETWORK'),
     discoveryList(app, intents, nameInput),
     el('div', { class: 'section-label' }, 'OR ENTER A CODE'),
@@ -101,12 +237,116 @@ function joinScreen(app, intents) {
     el('div', { class: 'btn-row' },
       el('button', {
         class: 'btn btn-primary',
-        onclick: () => intents.join(codeInput.value, nameInput.value),
-      }, '> CONNECT'),
+        onclick: () => (spectate ? intents.spectate(codeInput.value, nameInput.value)
+                                 : intents.join(codeInput.value, nameInput.value)),
+      }, spectate ? '▷ WATCH' : '> CONNECT'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '‹ BACK'),
     ),
+    el('button', { class: 'link-btn', onclick: () => intents.gotoHowTo() }, '? How to play'),
   ];
   return shell(...children);
+}
+
+// ---------------------------------------------------------------------------
+// HOW TO PLAY
+// ---------------------------------------------------------------------------
+function howToScreen(app, intents) {
+  // A self-contained rules primer. Pure static content — no game state needed.
+  const step = (n, title, ...body) =>
+    el('li', { class: 'howto-step' },
+      el('span', { class: 'howto-step-num' }, String(n)),
+      el('div', { class: 'howto-step-body' },
+        el('h3', { class: 'howto-step-title' }, title),
+        ...body));
+
+  const role = (name, team, desc) =>
+    el('li', { class: 'howto-role howto-role-' + team },
+      el('span', { class: 'howto-role-name' }, name),
+      el('span', { class: 'howto-role-desc' }, desc));
+
+  return shell(
+    wordmark(),
+    el('h1', { class: 'hero hero-sm' }, 'How to play'),
+    el('p', { class: 'tagline' },
+      'Avalon is a game of ', el('span', { class: 'accent' }, 'hidden roles'),
+      ' for 5–10 players. Everyone is secretly ', el('span', { class: 'good' }, 'Good'),
+      ' or ', el('span', { class: 'evil' }, 'Evil'), '.'),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'THE GOAL'),
+      el('p', { class: 'howto-text' },
+        'Good wins by succeeding ', el('strong', {}, '3 of 5 Quests'),
+        '. Evil wins by failing 3 Quests — or, at the very end, by ',
+        el('strong', {}, 'assassinating Merlin'), '. Evil knows who each other are; '
+        + 'Good must work it out from how people vote and play.'),
+    ),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'A ROUND, STEP BY STEP'),
+      el('ol', { class: 'howto-steps' },
+        step(1, 'A leader proposes a team',
+          el('p', { class: 'howto-text' },
+            'The leader picks players to go on the Quest. The number needed is set by the '
+            + 'board for the current round and player count.')),
+        step(2, 'Everyone votes on the team',
+          el('p', { class: 'howto-text' },
+            'All players simultaneously Approve or Reject the proposed team. A majority '
+            + 'Approve sends it on the Quest; otherwise leadership passes to the next player '
+            + 'and a new team is proposed. ',
+            el('strong', {}, 'Five rejected proposals in one round = Evil wins that Quest.'))),
+        step(3, 'The team goes on the Quest',
+          el('p', { class: 'howto-text' },
+            'Only the chosen team members secretly play a card: ',
+            el('span', { class: 'good' }, 'Success'), ' or ', el('span', { class: 'evil' }, 'Fail'),
+            '. Good players must play Success. Evil players may play either. ',
+            'Cards are shuffled, so you see the count but not who played what.')),
+        step(4, 'Resolve the Quest',
+          el('p', { class: 'howto-text' },
+            'One Fail card usually fails the Quest. (With 7+ players, the 4th Quest needs '
+            + 'two Fails.) Then the next round begins with a new leader.')),
+      ),
+    ),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'WINNING'),
+      el('p', { class: 'howto-text' },
+        'First side to ', el('strong', {}, '3 Quests'), ' wins the board. But if Good reaches 3, '
+        + 'Evil gets one last chance: the ', el('span', { class: 'evil' }, 'Assassin'),
+        ' names the player they think is ', el('span', { class: 'good' }, 'Merlin'),
+        '. Guess right and Evil steals the win.'),
+    ),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'SPECIAL ROLES'),
+      el('ul', { class: 'howto-roles' },
+        role('Merlin', 'good', 'Knows who the Evil players are — but must stay hidden, or the Assassin will find them.'),
+        role('Percival', 'good', 'Sees Merlin (and Morgana) but can\'t tell which is which.'),
+        role('Loyal Servant', 'good', 'No special knowledge — just vote and play wisely.'),
+        role('Assassin', 'evil', 'At the end, picks who to assassinate. Killing Merlin wins the game for Evil.'),
+        role('Morgana', 'evil', 'Appears to Percival as Merlin, sowing doubt.'),
+        role('Mordred', 'evil', 'Hidden from Merlin — Good\'s seer never sees them.'),
+        role('Oberon', 'evil', 'Evil, but unknown to the other Evil players (and they\'re unknown to Oberon).'),
+        role('Minion of Mordred', 'evil', 'Plain Evil — knows the other Evil players.'),
+      ),
+      el('p', { class: 'fine' }, 'The host picks which roles are in play before each game. '
+        + 'Some setups add advanced roles (Cleric, Lancelot, Lunatic and more) — when you have one, '
+        + 'your private role card explains exactly what it does.'),
+    ),
+
+    el('section', { class: 'howto-section' },
+      el('div', { class: 'section-label' }, 'TIPS'),
+      el('ul', { class: 'howto-tips' },
+        el('li', {}, 'Watch who proposes and approves teams — patterns reveal sides.'),
+        el('li', {}, 'A surprise Fail tells you an Evil player was on that team.'),
+        el('li', {}, 'If you\'re Merlin, hint carefully — being too obviously informed gets you assassinated.'),
+        el('li', {}, 'Talk! The real game happens in the discussion between rounds.'),
+      ),
+    ),
+
+    el('div', { class: 'btn-row' },
+      el('button', { class: 'btn btn-primary', onclick: () => intents.backFromHowTo() }, '‹ BACK'),
+    ),
+  );
 }
 
 // The auto-discovered list of open games (or an explanatory fallback).
@@ -117,7 +357,7 @@ function discoveryList(app, intents, nameInput) {
   if (state === 'unsupported') {
     return el('p', { class: 'fine' },
       'Automatic discovery isn’t available on the public signaling server — ',
-      'enter the 4-character code the host is showing instead. ',
+      'enter the 4-digit code the host is showing instead. ',
       '(Self-host a PeerServer on your LAN to enable the live list.)');
   }
 
@@ -133,24 +373,34 @@ function discoveryList(app, intents, nameInput) {
       'No open games found yet. Make sure you’re on the same Wi-Fi as the host, or enter a code below.');
   }
 
+  const spectate = !!app.spectatorMode;
+
   return el('ul', { class: 'game-list' },
-    ...games.map(g => el('li', {},
-      el('button', {
-        class: 'game-row' + (g.joinable ? '' : ' game-row-busy'),
-        disabled: g.joinable ? false : true,
-        onclick: () => g.joinable && intents.join(g.code, nameInput.value),
-      },
-        el('span', { class: 'game-code' }, g.code),
-        el('span', { class: 'game-meta' },
-          el('span', { class: 'game-host' }, (g.hostName || 'Host') + '’s game'),
-          el('span', { class: 'game-sub' },
-            g.joinable
-              ? `${g.playerCount} ${g.playerCount === 1 ? 'player' : 'players'} in lobby`
-              : 'In progress — can’t join'),
+    ...games.map(g => {
+      // Spectators may watch ANY game (lobby or in-progress); players can only
+      // enter a game still in its lobby.
+      const actionable = spectate ? true : g.joinable;
+      const act = () => actionable && (spectate
+        ? intents.spectate(g.code, nameInput.value)
+        : intents.join(g.code, nameInput.value));
+      return el('li', {},
+        el('button', {
+          class: 'game-row' + (actionable ? '' : ' game-row-busy'),
+          disabled: actionable ? false : true,
+          onclick: act,
+        },
+          el('span', { class: 'game-code' }, g.code),
+          el('span', { class: 'game-meta' },
+            el('span', { class: 'game-host' }, (g.hostName || 'Host') + '’s game'),
+            el('span', { class: 'game-sub' },
+              g.joinable
+                ? `${g.playerCount} ${g.playerCount === 1 ? 'player' : 'players'} in lobby`
+                : (spectate ? 'In progress — watch live' : 'In progress — can’t join')),
+          ),
+          el('span', { class: 'game-go' }, actionable ? '▷' : '🔒'),
         ),
-        el('span', { class: 'game-go' }, g.joinable ? '▷' : '🔒'),
-      ),
-    )),
+      );
+    }),
   );
 }
 
@@ -229,6 +479,9 @@ function lobbyScreen(app, intents) {
         players.length < MIN_PLAYERS
           ? `Need at least ${MIN_PLAYERS} players to start.`
           : (v.errors[0] || '')));
+    } else if (v.warnings && v.warnings.length) {
+      // Non-blocking advice: the host can still start with this lineup.
+      children.push(el('p', { class: 'fine warn' }, '⚠ ' + v.warnings[0]));
     }
     children.push(el('div', { class: 'btn-row' },
       el('button', {
@@ -236,13 +489,15 @@ function lobbyScreen(app, intents) {
         disabled: canStart ? false : true,
         onclick: () => canStart && intents.startGame(),
       }, '> START GAME'),
+      el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'LEAVE'),
     ));
   } else {
     children.push(el('p', { class: 'tagline' }, 'Waiting for the host to ', el('span', { class: 'accent' }, 'start the game'), '…'));
     children.push(el('div', { class: 'spinner' }));
     children.push(el('div', { class: 'btn-row' },
-      el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'LEAVE')));
+      el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
+      el('button', { class: 'btn btn-secondary', onclick: intents.requestLeaveGame }, 'LEAVE')));
   }
 
   return shell(...children, liveRegion(`${players.length} players in lobby`));
@@ -309,13 +564,32 @@ function roleConfigEditor(app, intents) {
 
 // Host-only game options (non-role settings).
 function gameOptions(app, intents) {
-  const on = !!app.allowReveal;
+  const revealOn = !!app.allowReveal;
+  const randomOn = !!app.randomLeaderOrder;
+  const timerOn = !!app.questTimerEnabled;
+  const pendingOn = !!app.showPendingVoters;
+  const timerMin = Math.round((app.questTimerSeconds || 120) / 60);
+
+  // Minute picker (1-5), shown only when the proposal timer is enabled.
+  const minutePicker = timerOn
+    ? el('div', { class: 'timer-picker' },
+        el('span', { class: 'timer-picker-label' }, 'MINUTES PER PROPOSAL'),
+        el('div', { class: 'timer-picker-row' },
+          ...[1, 2, 3, 4, 5].map(m => el('button', {
+            type: 'button',
+            class: 'timer-chip' + (m === timerMin ? ' sel' : ''),
+            onclick: () => intents.setQuestTimerMinutes(m),
+          }, String(m))),
+        ),
+      )
+    : null;
+
   return el('section', { class: 'config' },
     el('div', { class: 'section-label' }, 'GAME OPTIONS'),
     el('div', { class: 'toggle-list' },
-      el('label', { class: 'toggle' + (on ? ' on' : '') },
+      el('label', { class: 'toggle' + (revealOn ? ' on' : '') },
         el('input', {
-          type: 'checkbox', ...(on ? { checked: true } : {}),
+          type: 'checkbox', ...(revealOn ? { checked: true } : {}),
           onchange: () => intents.toggleReveal(),
         }),
         el('span', { class: 'toggle-box' }),
@@ -324,7 +598,41 @@ function gameOptions(app, intents) {
           el('span', { class: 'toggle-blurb' }, 'Players can privately peek at their own role throughout the game.'),
         ),
       ),
+      el('label', { class: 'toggle' + (randomOn ? ' on' : '') },
+        el('input', {
+          type: 'checkbox', ...(randomOn ? { checked: true } : {}),
+          onchange: () => intents.toggleRandomLeader(),
+        }),
+        el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, 'Random leader order'),
+          el('span', { class: 'toggle-blurb' }, 'Shuffle the leader rotation each game instead of going around the table in order.'),
+        ),
+      ),
+      el('label', { class: 'toggle' + (timerOn ? ' on' : '') },
+        el('input', {
+          type: 'checkbox', ...(timerOn ? { checked: true } : {}),
+          onchange: () => intents.toggleQuestTimer(),
+        }),
+        el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, 'Proposal timer'),
+          el('span', { class: 'toggle-blurb' }, 'Give the leader a countdown to pick each quest team. Time-out passes leadership to the next player (no penalty).'),
+        ),
+      ),
+      el('label', { class: 'toggle' + (pendingOn ? ' on' : '') },
+        el('input', {
+          type: 'checkbox', ...(pendingOn ? { checked: true } : {}),
+          onchange: () => intents.toggleShowPendingVoters(),
+        }),
+        el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, 'Show pending voters'),
+          el('span', { class: 'toggle-blurb' }, 'During the team vote, show everyone which players still haven\'t voted — no hint at how they voted.'),
+        ),
+      ),
     ),
+    minutePicker,
   );
 }
 
@@ -415,7 +723,9 @@ function boardScreen(app, intents) {
   const pub = app.pub;
   return shell(
     boardHeader(pub),
-    questTrack(pub),
+    // The quest progress row stays pinned to the top so it's always visible,
+    // even after scrolling past the roster on smaller screens.
+    el('div', { class: 'quest-track-sticky' }, questTrack(pub)),
     voteTrack(pub),
     rosterBoard(pub, app),
     contextPanel(app, intents),
@@ -498,6 +808,7 @@ function proposalPanel(app, intents) {
   if (!isLeader) {
     const leader = pub.players.find(p => p.id === pub.leaderId);
     return panel('TEAM PROPOSAL',
+      proposalCountdown(app),
       el('p', { class: 'tagline' }, 'Waiting for ',
         el('span', { class: 'accent' }, leader ? leader.name : 'the leader'),
         ` to propose a team of ${need}.`),
@@ -515,6 +826,7 @@ function proposalPanel(app, intents) {
   );
   const ready = selected.size === need;
   return panel(`PROPOSE A TEAM OF ${need}`,
+    proposalCountdown(app),
     el('p', { class: 'fine' }, `Selected ${selected.size}/${need}.`),
     chips,
     el('div', { class: 'btn-row' },
@@ -524,6 +836,23 @@ function proposalPanel(app, intents) {
         onclick: () => ready && intents.propose([...selected]),
       }, '> CONFIRM TEAM'),
     ),
+  );
+}
+
+// Live countdown shown to everyone during the proposal phase when the host
+// enabled the proposal timer. Computed from a local deadline so it stays smooth
+// between state pushes; main.js drives a 1s repaint while this is on screen.
+function proposalCountdown(app) {
+  if (app.localProposalDeadline == null) return null;
+  const remMs = Math.max(0, app.localProposalDeadline - Date.now());
+  const totalSec = Math.ceil(remMs / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const label = `${m}:${String(s).padStart(2, '0')}`;
+  const urgent = totalSec <= 30;
+  return el('div', { class: 'proposal-timer' + (urgent ? ' urgent' : '') },
+    el('span', { class: 'timer-eyebrow' }, 'TIME LEFT'),
+    el('span', { class: 'timer-clock' }, label),
   );
 }
 
@@ -543,12 +872,15 @@ function votePanel(app, intents) {
     return panel(pub.lastVoteApproved ? 'TEAM APPROVED' : 'TEAM REJECTED', rows);
   }
 
-  const me = pub.players.find(p => p.id === app.me.id);
   const hasVoted = app.priv && app.priv.hasVoted;
+  const currentVote = app.priv ? app.priv.currentVote : null;
   const team = pub.proposal ? pub.proposal.members : [];
   const teamNames = pub.players.filter(p => team.includes(p.id)).map(p => p.name);
   const progress = pub.voteProgress || [];
   const votedCount = progress.filter(x => x.voted).length;
+
+  const approveSelected = hasVoted && currentVote === true;
+  const rejectSelected = hasVoted && currentVote === false;
 
   const header = panel('VOTE ON THE TEAM',
     el('p', { class: 'tagline' }, 'Proposed: ',
@@ -556,16 +888,43 @@ function votePanel(app, intents) {
   );
 
   if (hasVoted) {
-    header.appendChild(el('p', { class: 'fine' }, `Vote locked. ${votedCount}/${progress.length} in…`));
-    header.appendChild(el('div', { class: 'spinner' }));
-    return header;
+    header.appendChild(el('p', { class: 'fine' }, `${votedCount}/${progress.length} votes in… You can change your mind.`));
+  }
+
+  // Host option: surface WHO still owes a vote (never how anyone voted).
+  if (pub.showPendingVoters) {
+    const pending = pendingVotersBlock(pub);
+    if (pending) header.appendChild(pending);
   }
 
   header.appendChild(el('div', { class: 'btn-row' },
-    el('button', { class: 'btn btn-primary', onclick: () => intents.vote(true) }, '✓ APPROVE'),
-    el('button', { class: 'btn btn-secondary', onclick: () => intents.vote(false) }, '✗ REJECT'),
+    el('button', {
+      class: 'btn btn-primary' + (approveSelected ? ' btn-selected' : ''),
+      onclick: () => intents.vote(true),
+    }, '✓ APPROVE'),
+    el('button', {
+      class: 'btn btn-secondary' + (rejectSelected ? ' btn-selected' : ''),
+      onclick: () => intents.vote(false),
+    }, '✗ REJECT'),
   ));
   return header;
+}
+
+// Names of online players who still owe a vote (host "Show pending voters"
+// option). Reveals only WHO is outstanding, never which way anyone voted.
+function pendingVotersBlock(pub) {
+  const progress = pub.voteProgress || [];
+  const nameById = new Map(pub.players.map(p => [p.id, p.name]));
+  const pending = progress.filter(x => !x.voted).map(x => nameById.get(x.id) || '—');
+  if (pending.length === 0) {
+    return el('p', { class: 'fine pending-done' }, 'All votes in — revealing…');
+  }
+  return el('div', { class: 'pending-voters' },
+    el('span', { class: 'pending-label' }, `WAITING ON ${pending.length}`),
+    el('div', { class: 'pending-names' },
+      ...pending.map(n => el('span', { class: 'pending-chip' }, n)),
+    ),
+  );
 }
 
 // --- Quest -----------------------------------------------------------------
@@ -600,23 +959,33 @@ function questPanel(app, intents) {
     );
   }
 
-  // The Lunatic is compelled to Fail — offer only that.
-  if (priv.mustFail) {
-    return panel('PLAY YOUR QUEST CARD',
-      el('p', { class: 'fine' }, 'As the Lunatic, you must play ', el('span', { class: 'accent' }, 'Fail'), '.'),
-      el('div', { class: 'btn-row' },
-        el('button', { class: 'btn btn-secondary btn-fail', onclick: () => intents.playCard(false) }, '✗ FAIL')),
-    );
-  }
-  const buttons = [el('button', { class: 'btn btn-primary', onclick: () => intents.playCard(true) }, '✓ SUCCESS')];
-  if (priv.mayFail) {
-    buttons.push(el('button', { class: 'btn btn-secondary btn-fail', onclick: () => intents.playCard(false) }, '✗ FAIL'));
-  }
+  // Everyone sees the SAME two options (Success + Fail) so a glance at another
+  // player's screen never reveals their allegiance. The engine still enforces
+  // the real rules — tapping a card you're not allowed to play shows a private
+  // nudge instead of submitting anything.
+  const successAllowed = !priv.mustFail;            // only the Lunatic can't succeed
+  const failAllowed = priv.mayFail || priv.mustFail; // evil (and the compelled Lunatic)
+
+  const notice = app.questNotice
+    ? el('p', { class: 'error-text', role: 'alert' },
+        app.questNotice === 'fail'
+          ? 'You cannot play Fail on this quest.'
+          : 'You cannot play Success on this quest.')
+    : null;
+
   return panel('PLAY YOUR QUEST CARD',
-    el('p', { class: 'fine' },
-      priv.mayFail ? 'You may help or sabotage.'
-                   : 'You must play Success on this quest.'),
-    el('div', { class: 'btn-row' }, ...buttons),
+    el('p', { class: 'fine' }, 'Play your card to decide the quest\'s fate.'),
+    notice,
+    el('div', { class: 'btn-row' },
+      el('button', {
+        class: 'btn btn-primary',
+        onclick: successAllowed ? () => intents.playCard(true) : () => intents.questBlocked('success'),
+      }, '✓ SUCCESS'),
+      el('button', {
+        class: 'btn btn-secondary btn-fail',
+        onclick: failAllowed ? () => intents.playCard(false) : () => intents.questBlocked('fail'),
+      }, '✗ FAIL'),
+    ),
   );
 }
 
@@ -686,15 +1055,431 @@ function gameOverScreen(app, intents) {
   if (app.me.isHost) {
     children.push(el('div', { class: 'btn-row' },
       el('button', { class: 'btn btn-primary', onclick: intents.playAgain }, '> PLAY AGAIN'),
+      el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'NEW GAME'),
     ));
   } else {
     children.push(el('p', { class: 'fine' }, 'Waiting for the host to start a new round, or leave to go home.'));
     children.push(el('div', { class: 'btn-row' },
-      el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, 'LEAVE')));
+      el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
+      el('button', { class: 'btn btn-secondary', onclick: intents.requestLeaveGame }, 'LEAVE')));
   }
 
   return shell(...children, liveRegion(evilWon ? 'Evil wins' : 'Good wins'));
+}
+
+// ---------------------------------------------------------------------------
+// SPECTATOR — a single-screen, TV-optimised PUBLIC view. No scrolling, no
+// controls, and never any secret info: a spectator is just another client that
+// receives publicState() with priv=null, so it can ONLY ever show what every
+// player already sees on the shared board (roster, quest track, rejects, the
+// current phase, vote tallies once revealed, and the full reveal at game over).
+// Everything is sized to the viewport so a wall display can stay untouched.
+// ---------------------------------------------------------------------------
+function spectatorScreen(app, intents) {
+  const pub = app.pub;
+  if (!pub) return infoScreen('Connecting…', `Joining room ${app.code} as a spectator.`, true);
+
+  const head = el('header', { class: 'tv-head' },
+    el('div', { class: 'tv-brand' },
+      el('span', { class: 'wordmark-dot' }), 'THE RESISTANCE · AVALON'),
+    el('div', { class: 'tv-code' },
+      el('span', { class: 'tv-code-label' }, 'ROOM'),
+      el('span', { class: 'tv-code-value' }, app.code || '----')),
+    el('div', { class: 'tv-badge' }, 'SPECTATOR'),
+  );
+
+  // Game over: hand the whole stage to the winner banner + full role reveal.
+  if (pub.phase === 'gameover') {
+    return el('main', { class: 'tv-shell tv-over' }, head, tvGameOver(pub),
+      liveRegion(pub.winner === 'evil' ? 'Evil wins' : 'Good wins'));
+  }
+
+  const body = (pub.phase === 'lobby')
+    ? el('section', { class: 'tv-body tv-body-lobby' },
+        el('div', { class: 'tv-left' }, tvRoster(pub), tvStatus(app)),
+        tvRolesLineup(pub),
+      )
+    : el('section', { class: 'tv-body' },
+        el('div', { class: 'tv-left' }, tvQuestTrack(pub), tvRoster(pub)),
+        tvStatus(app),
+      );
+
+  return el('main', { class: 'tv-shell' },
+    head,
+    body,
+    tvFoot(pub),
+    liveRegion(phaseAnnouncement(pub)),
+  );
+}
+
+// Large quest track for the TV view (Q1–Q5 with team sizes + results).
+function tvQuestTrack(pub) {
+  const sizes = pub.questSizes || [];
+  const nodes = sizes.map((sz, i) => {
+    const res = pub.questResults[i];
+    let cls = 'tv-quest';
+    if (res === 'success') cls += ' success';
+    else if (res === 'fail') cls += ' fail';
+    else if (i === pub.currentQuest) cls += ' current';
+    const twoFail = (i === 3 && pub.playerCount >= 7);
+    return el('div', { class: cls },
+      el('div', { class: 'tv-quest-num' }, `Q${i + 1}`),
+      el('div', { class: 'tv-quest-size' }, String(sz)),
+      el('div', { class: 'tv-quest-mark' },
+        res === 'success' ? '✓' : res === 'fail' ? '✗' : (twoFail ? '2✗' : '')),
+    );
+  });
+  return el('div', { class: 'tv-quests' }, ...nodes);
+}
+
+// Player tiles — names only, plus public markers (leader, on-quest, online).
+// NEVER renders a role or team: a spectator screen must reveal nothing secret.
+function tvRoster(pub) {
+  const proposed = new Set(pub.proposal ? pub.proposal.members : []);
+  const n = pub.players.length;
+  return el('ul', { class: 'tv-roster', 'data-n': String(n) },
+    ...pub.players.map(p => el('li', {
+      class: 'tv-player'
+        + (p.isLeader ? ' is-leader' : '')
+        + (proposed.has(p.id) ? ' on-team' : '')
+        + (p.online ? '' : ' off'),
+    },
+      el('span', { class: 'tv-player-name' }, p.name),
+      el('span', { class: 'tv-player-tags' },
+        p.isLeader ? el('span', { class: 'tv-tag tv-tag-lead' }, 'LEADER') : null,
+        proposed.has(p.id) ? el('span', { class: 'tv-tag' }, 'ON QUEST') : null,
+        p.online ? null : el('span', { class: 'tv-tag tv-tag-off' }, 'AWAY'),
+      ),
+    )),
+  );
+}
+
+// Lobby-only roles lineup for the TV: the FULL role catalogue with descriptions,
+// split Good/Evil, dimming the ones not in this game's config and marking the
+// selected ones (filler roles show their seat count). This is all public info
+// (the config is in publicState) — it reveals the menu, never who holds what.
+function tvRolesLineup(pub) {
+  const cfg = pub.config || {};
+  const card = (role) => {
+    const n = cfg[role.id] || 0;
+    const inPlay = n > 0 || !role.optional; // Merlin/Assassin are always in
+    const isFiller = FILLER_ROLE_IDS.includes(role.id);
+    const state = isFiller ? `×${n}` : (inPlay ? 'IN' : '—');
+    return el('li', {
+      class: 'tv-role ' + (role.team === 'evil' ? 'evil' : 'good') + (inPlay ? ' in' : ' out'),
+    },
+      el('div', { class: 'tv-role-head' },
+        el('span', { class: 'tv-role-name' }, role.name),
+        el('span', { class: 'tv-role-state' }, state),
+      ),
+      el('p', { class: 'tv-role-blurb' }, role.blurb),
+    );
+  };
+  const all = Object.values(ROLES);
+  const good = all.filter(r => r.team === 'good');
+  const evil = all.filter(r => r.team === 'evil');
+  return el('div', { class: 'tv-roles' },
+    el('div', { class: 'tv-roles-col' },
+      el('div', { class: 'tv-roles-head good' }, 'GOOD'),
+      el('ul', { class: 'tv-roles-list' }, ...good.map(card)),
+    ),
+    el('div', { class: 'tv-roles-col' },
+      el('div', { class: 'tv-roles-head evil' }, 'EVIL'),
+      el('ul', { class: 'tv-roles-list' }, ...evil.map(card)),
+    ),
+  );
+}
+
+// Reject track + a one-line leader/phase caption along the bottom.
+function tvFoot(pub) {
+  const leader = pub.players.find(p => p.id === pub.leaderId);
+  const dots = [];
+  for (let i = 0; i < pub.maxRejects; i++) {
+    dots.push(el('span', { class: 'tv-reject-dot' + (i < pub.rejectCount ? ' filled' : '') }));
+  }
+  return el('footer', { class: 'tv-foot' },
+    el('div', { class: 'tv-foot-leader' },
+      'LEADER ', el('span', { class: 'accent' }, leader ? leader.name : '—')),
+    el('div', { class: 'tv-rejects' },
+      el('span', { class: 'tv-rejects-label' }, 'REJECTS'),
+      el('span', { class: 'tv-rejects-dots' }, ...dots),
+      el('span', { class: 'tv-rejects-warn' }, 'EVIL WINS AT 5'),
+    ),
+  );
+}
+
+// The central status panel: a big, glanceable summary of the current beat.
+function tvStatus(app) {
+  const pub = app.pub;
+  switch (pub.phase) {
+    case 'lobby': {
+      return tvPanel('IN THE LOBBY',
+        el('p', { class: 'tv-lead' }, `${pub.playerCount} ${pub.playerCount === 1 ? 'player' : 'players'} joined`),
+        el('p', { class: 'tv-sub' }, 'Waiting for the host to start the game…'),
+      );
+    }
+    case 'roleReveal': {
+      return tvPanel('ROLES DEALT',
+        el('p', { class: 'tv-lead' }, `${pub.readyCount}/${pub.playerCount} ready`),
+        el('p', { class: 'tv-sub' }, 'Players are reviewing their secret roles in private.'),
+      );
+    }
+    case 'proposal': {
+      const leader = pub.players.find(p => p.id === pub.leaderId);
+      return tvPanel(`QUEST ${pub.currentQuest + 1} · PROPOSAL`,
+        el('p', { class: 'tv-lead' },
+          el('span', { class: 'accent' }, leader ? leader.name : 'The leader'),
+          ' is choosing a team'),
+        el('p', { class: 'tv-sub' }, `Team needs ${pub.requiredTeamSize} player${pub.requiredTeamSize === 1 ? '' : 's'}.`),
+        tvCountdown(app),
+      );
+    }
+    case 'vote': {
+      // Reveal beat: show the outcome + each player's open vote (public once in).
+      if (pub.revealedVotes && pub.voteResolved) {
+        const approves = pub.revealedVotes.filter(v => v.vote === true).length;
+        const rejects = pub.revealedVotes.filter(v => v.vote === false).length;
+        return tvPanel(pub.lastVoteApproved ? 'TEAM APPROVED' : 'TEAM REJECTED',
+          el('div', { class: 'tv-tally' },
+            el('span', { class: 'tv-tally-cell good' }, `✓ ${approves}`),
+            el('span', { class: 'tv-tally-cell evil' }, `✗ ${rejects}`),
+          ),
+          el('ul', { class: 'tv-votes' },
+            ...pub.revealedVotes.map(v => el('li', {
+              class: 'tv-vote ' + (v.vote === true ? 'yes' : v.vote === false ? 'no' : 'na'),
+            }, el('span', { class: 'tv-vote-name' }, v.name),
+               el('span', { class: 'tv-vote-mark' }, v.vote === null ? '—' : (v.vote ? '✓' : '✗')))),
+          ),
+        );
+      }
+      const team = pub.proposal ? pub.proposal.members : [];
+      const teamNames = pub.players.filter(p => team.includes(p.id)).map(p => p.name);
+      const progress = pub.voteProgress || [];
+      const votedCount = progress.filter(x => x.voted).length;
+      const children = [
+        el('p', { class: 'tv-lead' }, 'Proposed: ',
+          el('span', { class: 'accent' }, teamNames.join(', ') || '—')),
+        el('p', { class: 'tv-sub' }, `${votedCount}/${progress.length} votes in…`),
+      ];
+      // Host option: surface WHO still owes a vote (never how anyone voted).
+      if (pub.showPendingVoters) {
+        const pending = pendingVotersBlock(pub);
+        if (pending) children.push(pending);
+      }
+      return tvPanel(`QUEST ${pub.currentQuest + 1} · VOTE`, ...children);
+    }
+    case 'quest': {
+      if (pub.questResolved) {
+        const ok = pub.lastQuestResult === 'success';
+        return tvPanel(ok ? `QUEST ${pub.currentQuest + 1} SUCCEEDED` : `QUEST ${pub.currentQuest + 1} FAILED`,
+          el('p', { class: 'tv-bigstat ' + (ok ? 'good' : 'evil') },
+            `${pub.lastQuestFails} fail${pub.lastQuestFails === 1 ? '' : 's'}`),
+          el('p', { class: 'tv-sub' }, 'Tallying the next round…'),
+        );
+      }
+      const progress = pub.questProgress || [];
+      const played = progress.filter(x => x.played).length;
+      return tvPanel(`QUEST ${pub.currentQuest + 1} · UNDERWAY`,
+        el('p', { class: 'tv-lead' }, 'The team is deciding the quest\'s fate'),
+        el('p', { class: 'tv-sub' }, `${played}/${progress.length} cards played…`),
+      );
+    }
+    case 'assassination': {
+      return tvPanel('THE ASSASSIN STRIKES',
+        el('p', { class: 'tv-lead evil' }, 'Good completed three quests'),
+        el('p', { class: 'tv-sub' }, 'The Assassin is hunting Merlin. Hold your breath…'),
+      );
+    }
+    default:
+      return tvPanel('', el('div', { class: 'spinner' }));
+  }
+}
+
+// Game-over stage for the TV: winner banner + full role reveal (public now).
+function tvGameOver(pub) {
+  const evilWon = pub.winner === 'evil';
+  const cards = (pub.reveal || []).map(r => el('div', { class: 'tv-reveal-card ' + (r.team === 'evil' ? 'evil' : 'good') },
+    el('span', { class: 'tv-reveal-name' }, r.name + (r.id === pub.assassinTargetId ? ' 🗡' : '')),
+    el('span', { class: 'tv-reveal-role' }, r.roleName),
+    el('span', { class: 'tv-tag ' + (r.team === 'evil' ? 'tv-tag-evil' : 'tv-tag-good') },
+      r.team === 'evil' ? 'EVIL' : 'GOOD'),
+  ));
+  return el('section', { class: 'tv-body tv-body-over' },
+    el('div', { class: 'tv-win ' + (evilWon ? 'evil' : 'good') },
+      el('div', { class: 'tv-win-side' }, evilWon ? 'EVIL WINS' : 'GOOD WINS'),
+      el('div', { class: 'tv-win-reason' }, pub.winReason || ''),
+    ),
+    el('div', { class: 'tv-reveal-grid', 'data-n': String((pub.reveal || []).length) }, ...cards),
+  );
+}
+
+// Spectator countdown — reuses the local proposal deadline that main.js keeps
+// in sync (it drives a 1s repaint while the spectator screen is on, too).
+function tvCountdown(app) {
+  if (app.localProposalDeadline == null) return null;
+  const remMs = Math.max(0, app.localProposalDeadline - Date.now());
+  const totalSec = Math.ceil(remMs / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const urgent = totalSec <= 30;
+  return el('div', { class: 'tv-timer' + (urgent ? ' urgent' : '') },
+    el('span', { class: 'timer-eyebrow' }, 'TIME LEFT'),
+    el('span', { class: 'tv-timer-clock' }, `${m}:${String(s).padStart(2, '0')}`),
+  );
+}
+
+function tvPanel(label, ...children) {
+  return el('section', { class: 'tv-status' },
+    label ? el('div', { class: 'tv-status-label' }, label) : null,
+    ...children,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// STATISTICS / LEADERBOARD
+// ---------------------------------------------------------------------------
+function statsScreen(app, intents) {
+  const data = app.statsData;
+  if (!data) {
+    return shell(
+      wordmark(),
+      el('h1', { class: 'hero hero-sm' }, 'Statistics'),
+      el('p', { class: 'tagline' }, 'No data available.'),
+      el('div', { class: 'btn-row' },
+        el('button', { class: 'btn btn-primary', onclick: intents.backToGame }, '‹ BACK TO GAME')),
+    );
+  }
+
+  const { summary, leaderboard } = data;
+
+  const children = [
+    wordmark(),
+    el('h1', { class: 'hero hero-sm' }, 'Leaderboard'),
+    el('p', { class: 'tagline' }, 'Room ', el('span', { class: 'accent' }, app.code || '—')),
+    roomSummaryBlock(summary),
+    leaderboardTable(leaderboard),
+    playerDetails(leaderboard),
+  ];
+
+  const actionBtns = [el('button', { class: 'btn btn-primary', onclick: intents.backToGame }, '‹ BACK TO GAME')];
+  if (app.me.isHost) {
+    actionBtns.push(el('button', { class: 'btn btn-danger', onclick: () => {
+      if (confirm('Reset all statistics for this room? This cannot be undone.')) {
+        intents.resetStats();
+      }
+    }}, 'RESET STATISTICS'));
+  }
+  children.push(el('div', { class: 'btn-row stats-actions' }, ...actionBtns));
+
+  return shell(...children);
+}
+
+function roomSummaryBlock(summary) {
+  return el('section', { class: 'stats-summary' },
+    el('div', { class: 'section-label' }, 'ROOM SUMMARY'),
+    el('div', { class: 'stats-grid' },
+      statCard('Games Played', summary.gamesPlayed),
+      statCard('Good Wins', summary.goodWins, 'good'),
+      statCard('Evil Wins', summary.evilWins, 'evil'),
+    ),
+  );
+}
+
+function statCard(label, value, team) {
+  const cls = 'stat-card' + (team ? ` stat-${team}` : '');
+  return el('div', { class: cls },
+    el('div', { class: 'stat-value' }, String(value)),
+    el('div', { class: 'stat-label' }, label),
+  );
+}
+
+function leaderboardTable(leaderboard) {
+  if (leaderboard.length === 0) {
+    return el('p', { class: 'fine' }, 'No games recorded yet.');
+  }
+
+  const header = el('tr', {},
+    el('th', {}, 'Player'),
+    el('th', {}, 'GP'),
+    el('th', {}, 'W'),
+    el('th', {}, 'W%'),
+    el('th', { class: 'hide-sm' }, 'Good'),
+    el('th', { class: 'hide-sm' }, 'Evil'),
+    el('th', { class: 'hide-sm' }, 'GW'),
+    el('th', { class: 'hide-sm' }, 'EW'),
+  );
+
+  const rows = leaderboard.map((p, i) => el('tr', { class: i === 0 ? 'top-player' : '' },
+    el('td', { class: 'lb-name' }, p.name),
+    el('td', {}, String(p.gamesPlayed)),
+    el('td', {}, String(p.wins)),
+    el('td', {}, p.winPct + '%'),
+    el('td', { class: 'hide-sm' }, String(p.good)),
+    el('td', { class: 'hide-sm' }, String(p.evil)),
+    el('td', { class: 'hide-sm' }, String(p.goodWins)),
+    el('td', { class: 'hide-sm' }, String(p.evilWins)),
+  ));
+
+  return el('section', { class: 'stats-leaderboard' },
+    el('div', { class: 'section-label' }, 'PLAYER LEADERBOARD'),
+    el('div', { class: 'table-wrap' },
+      el('table', { class: 'lb-table' },
+        el('thead', {}, header),
+        el('tbody', {}, ...rows),
+      ),
+    ),
+  );
+}
+
+function playerDetails(leaderboard) {
+  if (leaderboard.length === 0) return null;
+
+  const sections = leaderboard.map(p => {
+    const roleRows = Object.entries(p.roles)
+      .filter(([_, r]) => r.played > 0)
+      .sort((a, b) => b[1].played - a[1].played)
+      .map(([rid, r]) => {
+        const roleDef = ROLES[rid];
+        const rName = roleDef ? roleDef.name : rid;
+        const rTeam = roleDef ? roleDef.team : '?';
+        const winRate = r.played > 0 ? Math.round((r.wins / r.played) * 100) : 0;
+        return el('tr', {},
+          el('td', {},
+            el('span', { class: 'role-tag ' + rTeam }, rName),
+          ),
+          el('td', {}, String(r.played)),
+          el('td', {}, String(r.wins)),
+          el('td', {}, winRate + '%'),
+        );
+      });
+
+    if (roleRows.length === 0) return null;
+
+    return el('details', { class: 'player-detail' },
+      el('summary', { class: 'player-detail-summary' },
+        el('span', { class: 'pd-name' }, p.name),
+        el('span', { class: 'pd-meta' },
+          `${p.wins}W / ${p.gamesPlayed}GP · `,
+          `Good ${p.goodWinPct}% · Evil ${p.evilWinPct}%`,
+        ),
+      ),
+      el('table', { class: 'role-table' },
+        el('thead', {}, el('tr', {},
+          el('th', {}, 'Role'),
+          el('th', {}, 'Played'),
+          el('th', {}, 'Wins'),
+          el('th', {}, 'Win%'),
+        )),
+        el('tbody', {}, ...roleRows),
+      ),
+    );
+  }).filter(Boolean);
+
+  return el('section', { class: 'stats-details' },
+    el('div', { class: 'section-label' }, 'PLAYER DETAILS'),
+    ...sections,
+  );
 }
 
 // ---------------------------------------------------------------------------

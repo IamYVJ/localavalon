@@ -35,7 +35,15 @@ export class GameEngine {
     this.hostId = null;
     this.config = null;         // role config map { roleId: count }
     this.allowReveal = false;   // host option: let players re-check their role mid-game
+    this.randomLeaderOrder = false; // host option: shuffle leader traversal order each game
+    this.questTimerEnabled = false; // host option: countdown for each team-proposal round
+    this.questTimerSeconds = 120;   // chosen duration, clamped to 60-300 (1-5 minutes)
+    this.proposalDeadline = null;   // absolute host-clock ms when the current proposal expires
+    this.showPendingVoters = false; // host option: reveal who still owes a vote during the team vote
     this.leaderIndex = 0;
+    this.leaderOrder = null;    // null = sequential; array of seat indices = shuffled order
+    this.leaderOrderPos = 0;    // current position within leaderOrder
+    this.firstLeaderId = null;  // id of the first Quest Leader (the Cleric learns their loyalty)
     this.questIndex = 0;        // 0-based current quest
     this.questResults = [null, null, null, null, null]; // 'success' | 'fail' | null
     this.rejectCount = 0;
@@ -53,22 +61,46 @@ export class GameEngine {
   // Roster management
   // -------------------------------------------------------------------------
 
-  /** Seat a player, or let them reclaim their seat on reconnect (same name). */
-  addPlayer(id, name, { isHost = false } = {}) {
+  /**
+   * Seat a player, or let them reclaim their seat on reconnect.
+   *
+   * Reclaim precedence:
+   *   1. Stable clientId (same device) — reclaims even if the seat still shows
+   *      ONLINE. This is essential: mobile WebRTC is slow/unreliable at noticing
+   *      a dropped channel, so a reconnecting player often arrives while the host
+   *      still thinks their old connection is live. Keying off the device id
+   *      (not the stale online flag) is what makes rejoin actually work and
+   *      keeps a game from stalling on a "present" player who's really gone.
+   *   2. Name match (only when that seat is OFFLINE) — fallback for clients with
+   *      no stored clientId, or a same-name rejoin from a different device.
+   */
+  addPlayer(id, name, { isHost = false, clientId = null } = {}) {
     const trimmed = (name || '').trim();
     if (!trimmed) return { ok: false, error: 'Name required.' };
 
-    // Reconnect: a known name that is currently offline reclaims its seat+role.
-    const existing = this.players.find(
-      p => p.name.toLowerCase() === trimmed.toLowerCase()
-    );
-    if (existing) {
-      if (existing.online) {
-        return { ok: false, error: `The name "${trimmed}" is already taken.` };
+    // (1) Same device reconnecting — match by clientId regardless of online.
+    let existing = clientId
+      ? this.players.find(p => p.clientId && p.clientId === clientId)
+      : null;
+
+    // (2) Fall back to name match, but only reclaim an OFFLINE seat — an online
+    // seat with this name belongs to a different, currently-connected device.
+    if (!existing) {
+      const byName = this.players.find(p => p.name.toLowerCase() === trimmed.toLowerCase());
+      if (byName) {
+        if (byName.online) {
+          return { ok: false, error: `The name "${trimmed}" is already taken.` };
+        }
+        existing = byName;
       }
+    }
+
+    if (existing) {
       const oldId = existing.id;
       existing.online = true;
-      existing.id = id; // new connection id reclaims the seat
+      existing.id = id;                       // new connection id reclaims the seat
+      if (clientId) existing.clientId = clientId; // remember/refresh the device id
+      if (trimmed) existing.name = trimmed;   // honour a (re)typed display name
       if (oldId !== id) this._remapPlayerId(oldId, id); // fix mid-game id-keyed state
       if (isHost) this.hostId = id;
       return { ok: true, player: existing, reconnected: true };
@@ -81,7 +113,7 @@ export class GameEngine {
       return { ok: false, error: 'Game is full (10 players max).' };
     }
 
-    const player = { id, name: trimmed, online: true, roleId: null, ready: false };
+    const player = { id, name: trimmed, online: true, roleId: null, ready: false, clientId: clientId || null };
     this.players.push(player);
     if (isHost) this.hostId = id;
     return { ok: true, player };
@@ -133,6 +165,25 @@ export class GameEngine {
   /** Host toggle: when true, players may re-view their own role any time. */
   setAllowReveal(v) { this.allowReveal = !!v; }
 
+  /** Host toggle: when true, leader order is shuffled each game instead of sequential. */
+  setRandomLeaderOrder(v) { this.randomLeaderOrder = !!v; }
+
+  /**
+   * Host toggle: a countdown for each team-proposal round. `seconds` is clamped
+   * to the 60-300 (1-5 minute) range. When enabled, every proposal phase starts
+   * a fresh deadline; if the leader doesn't confirm in time the host advances
+   * leadership (see proposalTimedOut).
+   */
+  setQuestTimer(enabled, seconds) {
+    this.questTimerEnabled = !!enabled;
+    if (typeof seconds === 'number' && isFinite(seconds)) {
+      this.questTimerSeconds = Math.min(300, Math.max(60, Math.round(seconds)));
+    }
+  }
+
+  /** Host toggle: surface the names of players who still owe a team vote. */
+  setShowPendingVoters(v) { this.showPendingVoters = !!v; }
+
   /** Convenience used by the UI when player count changes in the lobby. */
   ensureConfig() {
     if (!this.config && ROLE_COUNTS_OK(this.count)) {
@@ -151,6 +202,22 @@ export class GameEngine {
     // Deal roles to seats.
     const deck = shuffle(buildRoleDeck(this.config));
     this.players.forEach((p, i) => { p.roleId = deck[i]; p.ready = false; });
+
+    // Generate leader traversal order (shuffled or sequential).
+    if (this.randomLeaderOrder) {
+      const indices = this.players.map((_, i) => i);
+      this.leaderOrder = shuffle(indices);
+      this.leaderOrderPos = 0;
+      this.leaderIndex = this.leaderOrder[0];
+    } else {
+      this.leaderOrder = null;
+      this.leaderOrderPos = 0;
+      this.leaderIndex = 0;
+    }
+
+    // Snapshot who leads the first quest — the Cleric's reveal depends on it,
+    // so it must stay fixed even after leadership rotates.
+    this.firstLeaderId = this.players[this.leaderIndex] ? this.players[this.leaderIndex].id : null;
 
     this.phase = PHASES.ROLE_REVEAL;
     return { ok: true };
@@ -173,16 +240,52 @@ export class GameEngine {
     this.votes = {};
     this.revealedVotes = null;
     this.questCards = {};
+    // Arm the per-proposal countdown (if the host enabled it).
+    this.proposalDeadline = this.questTimerEnabled
+      ? Date.now() + this.questTimerSeconds * 1000
+      : null;
   }
 
-  /** Advance leadership clockwise to the next ONLINE seat. */
+  /**
+   * Host-only: the proposal timer elapsed before the leader confirmed a team.
+   * Pass leadership to the next player and start a fresh proposal. This is
+   * deliberately NON-punitive — it does not count against the reject track, so
+   * a slow leader can't accidentally hand evil the game.
+   */
+  proposalTimedOut() {
+    if (this.phase !== PHASES.PROPOSAL) return { ok: false };
+    this._advanceLeader();
+    this._beginProposal();
+    return { ok: true };
+  }
+
+  /** Advance leadership to the next player (sequential or shuffled order). */
   _advanceLeader() {
     const n = this.players.length;
-    for (let step = 1; step <= n; step++) {
-      const idx = (this.leaderIndex + step) % n;
-      if (this.players[idx].online) { this.leaderIndex = idx; return; }
+
+    if (this.leaderOrder) {
+      // Shuffled order: walk through the permutation, skipping offline players.
+      const len = this.leaderOrder.length;
+      for (let step = 1; step <= len; step++) {
+        const pos = (this.leaderOrderPos + step) % len;
+        const idx = this.leaderOrder[pos];
+        if (this.players[idx] && this.players[idx].online) {
+          this.leaderOrderPos = pos;
+          this.leaderIndex = idx;
+          return;
+        }
+      }
+      // Fallback (all offline): just advance position.
+      this.leaderOrderPos = (this.leaderOrderPos + 1) % len;
+      this.leaderIndex = this.leaderOrder[this.leaderOrderPos];
+    } else {
+      // Sequential (clockwise): skip offline players.
+      for (let step = 1; step <= n; step++) {
+        const idx = (this.leaderIndex + step) % n;
+        if (this.players[idx].online) { this.leaderIndex = idx; return; }
+      }
+      this.leaderIndex = (this.leaderIndex + 1) % n;
     }
-    this.leaderIndex = (this.leaderIndex + 1) % n; // fallback (all offline)
   }
 
   proposeTeam(leaderId, members) {
@@ -202,6 +305,7 @@ export class GameEngine {
     this.phase = PHASES.VOTE;
     this.votes = {};
     this.revealedVotes = null;
+    this.proposalDeadline = null; // team locked in — stop the countdown
     return { ok: true };
   }
 
@@ -209,7 +313,8 @@ export class GameEngine {
     if (this.phase !== PHASES.VOTE) return { ok: false, error: 'Not voting now.' };
     const p = this.getPlayer(id);
     if (!p) return { ok: false, error: 'Unknown player.' };
-    if (id in this.votes) return { ok: false, error: 'You already voted.' };
+    // Once all votes are in and revealed, no more changes allowed.
+    if (this._voteResolved) return { ok: false, error: 'Voting is closed.' };
     this.votes[id] = !!approve;
     this._resolveVotesIfComplete();
     return { ok: true };
@@ -261,8 +366,9 @@ export class GameEngine {
     if (id in this.questCards) return { ok: false, error: 'You already played a card.' };
 
     const player = this.getPlayer(id);
-    // Good players may only play Success. Enforce server-side too.
-    if (ROLES[player.roleId].team === 'good' && success === false) {
+    // Good players may only play Success — except the Good Lancelot, who is
+    // explicitly permitted to sabotage. Enforce server-side too.
+    if (ROLES[player.roleId].team === 'good' && success === false && player.roleId !== 'lancelotGood') {
       return { ok: false, error: 'Good players must play Success.' };
     }
     // Lunatic must always Fail; Brute may only Fail on quests 1-3.
@@ -340,17 +446,34 @@ export class GameEngine {
     this.phase = PHASES.GAMEOVER;
   }
 
+  /**
+   * Host-only: abort the current game at any phase and return everyone to the
+   * lobby, keeping the seated players, role config, and game options intact so
+   * a new game can be set up immediately. Mechanically identical to playAgain()
+   * (which is the gameover path) — kept as a named method for clarity at the
+   * call site and so it can diverge later if needed.
+   */
+  endGame() { this.playAgain(); }
+
   /** Re-lobby keeping the same players and role config. */
   playAgain() {
     const players = this.players.map(p => ({ ...p, roleId: null, ready: false }));
     const config = this.config;
     const hostId = this.hostId;
     const allowReveal = this.allowReveal;
+    const randomLeaderOrder = this.randomLeaderOrder;
+    const questTimerEnabled = this.questTimerEnabled;
+    const questTimerSeconds = this.questTimerSeconds;
+    const showPendingVoters = this.showPendingVoters;
     this.reset();
     this.players = players;
     this.config = config;
     this.hostId = hostId;
     this.allowReveal = allowReveal;
+    this.randomLeaderOrder = randomLeaderOrder;
+    this.questTimerEnabled = questTimerEnabled;
+    this.questTimerSeconds = questTimerSeconds;
+    this.showPendingVoters = showPendingVoters;
   }
 
   // -------------------------------------------------------------------------
@@ -364,7 +487,15 @@ export class GameEngine {
       hostId: this.hostId,
       config: this.config,
       allowReveal: this.allowReveal,
+      randomLeaderOrder: this.randomLeaderOrder,
+      questTimerEnabled: this.questTimerEnabled,
+      questTimerSeconds: this.questTimerSeconds,
+      proposalDeadline: this.proposalDeadline,
+      showPendingVoters: this.showPendingVoters,
       leaderIndex: this.leaderIndex,
+      leaderOrder: this.leaderOrder,
+      leaderOrderPos: this.leaderOrderPos,
+      firstLeaderId: this.firstLeaderId,
       questIndex: this.questIndex,
       questResults: this.questResults,
       rejectCount: this.rejectCount,
@@ -391,7 +522,15 @@ export class GameEngine {
       hostId: s.hostId ?? null,
       config: s.config ?? null,
       allowReveal: !!s.allowReveal,
+      randomLeaderOrder: !!s.randomLeaderOrder,
+      questTimerEnabled: !!s.questTimerEnabled,
+      questTimerSeconds: s.questTimerSeconds ?? 120,
+      proposalDeadline: s.proposalDeadline ?? null,
+      showPendingVoters: !!s.showPendingVoters,
       leaderIndex: s.leaderIndex ?? 0,
+      leaderOrder: s.leaderOrder ?? null,
+      leaderOrderPos: s.leaderOrderPos ?? 0,
+      firstLeaderId: s.firstLeaderId ?? null,
       questIndex: s.questIndex ?? 0,
       questResults: s.questResults ?? [null, null, null, null, null],
       rejectCount: s.rejectCount ?? 0,
@@ -409,6 +548,12 @@ export class GameEngine {
     });
     // Everyone is offline until their connection re-establishes after reload.
     this.players.forEach(p => { p.online = (p.id === this.hostId); });
+    // A host reload landing mid-proposal would otherwise restore a deadline that
+    // may already be in the past (firing the timeout instantly). Give the leader
+    // a fresh window instead.
+    if (this.phase === PHASES.PROPOSAL && this.questTimerEnabled) {
+      this.proposalDeadline = Date.now() + this.questTimerSeconds * 1000;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -451,6 +596,14 @@ export class GameEngine {
       lastQuestResult: (this._questResolved) ? this.questResults[this.questIndex] : null,
       config: this.config,
       allowReveal: this.allowReveal,
+      questTimerEnabled: this.questTimerEnabled,
+      questTimerSeconds: this.questTimerSeconds,
+      // Remaining time on the current proposal, as a relative span so clients
+      // can render a synced countdown without depending on host clock alignment.
+      proposalRemainingMs: (this.phase === PHASES.PROPOSAL && this.proposalDeadline != null)
+        ? Math.max(0, this.proposalDeadline - Date.now())
+        : null,
+      showPendingVoters: this.showPendingVoters,
       readyCount: this.players.filter(p => p.ready).length,
       playerCount: this.players.length,
     };
@@ -479,21 +632,24 @@ export class GameEngine {
       priv.role = { id: role.id, name: role.name, team: role.team, blurb: role.blurb };
       priv.knowledge = computeKnowledge(
         { id: p.id, name: p.name, roleId: p.roleId },
-        this.players.map(x => ({ id: x.id, name: x.name, roleId: x.roleId }))
+        this.players.map(x => ({ id: x.id, name: x.name, roleId: x.roleId })),
+        { firstLeaderId: this.firstLeaderId }
       );
     }
 
     // Phase-specific private affordances.
     if (this.phase === PHASES.VOTE) {
       priv.hasVoted = id in this.votes;
+      priv.currentVote = (id in this.votes) ? this.votes[id] : null;
     }
     if (this.phase === PHASES.QUEST && this.proposal) {
       priv.onQuest = this.proposal.members.includes(id);
       priv.hasPlayedCard = id in this.questCards;
       const isEvil = p.roleId && ROLES[p.roleId].team === 'evil';
-      // Lunatic is compelled to Fail; Brute can't Fail on quests 4-5.
+      // Lunatic is compelled to Fail; Brute can't Fail on quests 4-5; the Good
+      // Lancelot is a Good player who is nonetheless allowed to Fail.
       priv.mustFail = priv.onQuest && p.roleId === 'lunatic';
-      let mayFail = priv.onQuest && isEvil;
+      let mayFail = priv.onQuest && (isEvil || p.roleId === 'lancelotGood');
       if (p.roleId === 'brute' && this.questIndex >= 3) mayFail = false;
       priv.mayFail = mayFail;
     }

@@ -6,6 +6,11 @@ else joins with a 4-character code. All game logic and authoritative state live
 in the host's tab — **no backend, no accounts**. Built to run on a shared Wi-Fi
 network and installable as a PWA that works offline (app shell).
 
+Extras beyond the base game: a **spectator / TV mode** (a watch-only, single
+screen public view that never sees secret roles — ideal for a shared display),
+an optional per-proposal **countdown timer**, a host **"show pending voters"**
+option, and a persistent per-room **stats leaderboard**.
+
 ## How it works
 
 - **Networking:** WebRTC peer-to-peer via [PeerJS](https://peerjs.com/). Star
@@ -33,33 +38,24 @@ js/
                           fail thresholds) + pure logic. Start here.
   state.js              host-authoritative game engine / state machine
   net.js                PeerJS networking (BROKER_CONFIG lives at the top)
-  ui.js                 rendering (pure view layer)
+  ui.js                 rendering (pure view layer, incl. spectator/TV screen)
   util.js               helpers (room code, clipboard, persistence, DOM)
+  stats.js              persistent per-room leaderboard (localStorage)
   main.js               controller wiring net + engine + UI together
 icons/                  app icons (svg + generated png)
 scripts/gen-icons.js    regenerates the PNG icons (node, no deps)
+scripts/test-engine.mjs engine + rules correctness tests (node, no deps)
+scripts/test-stats.mjs  leaderboard/stats correctness tests (node, no deps)
 ```
 
-## Run locally
+## Tests
 
-No build step required — it's plain static files. Serve the folder over HTTP
-(service workers and ES modules don't work from `file://`):
+Pure logic (engine, rules, stats) has a dependency-free node harness:
 
 ```bash
-# Option A — Node
-npx serve .
-
-# Option B — Python
-python3 -m http.server 8000
+node scripts/test-engine.mjs
+node scripts/test-stats.mjs
 ```
-
-Then open the printed URL (e.g. `http://localhost:8000`). To test multiplayer
-on your LAN, have other devices visit `http://<your-computer-ip>:8000`.
-
-> Note: some browsers require a **secure context** (HTTPS or `localhost`) for
-> clipboard and service worker. `localhost` counts as secure; for other devices
-> on the LAN, use the host's IP — the game still works, with a clipboard
-> fallback.
 
 ## Deploy to GitHub Pages
 
@@ -79,11 +75,14 @@ that folder in the Pages settings — paths stay relative.)
 ## Game rules implemented
 
 - 5–10 players; Good:Evil splits 3:2 / 4:2 / 4:3 / 5:3 / 6:3 / 6:4.
-- Roles: Merlin & Assassin (always), plus optional **Percival**, the **Lovers**
-  (Tristan & Isolde, who see each other) on the Good side, and **Morgana**,
-  **Mordred**, **Oberon**, **Lunatic** (must Fail every quest), and **Brute**
-  (may only Fail quests 1–3) on the Evil side. Loyal Servants and Minions fill
-  the remaining seats.
+- Roles: Merlin & Assassin (always). Optional **Good** roles — **Percival**, the
+  **Lovers** (Tristan & Isolde, who see each other), the **Cleric** (learns
+  whether the first Quest Leader is Good or Evil), and the **Untrustworthy
+  Servant** (Good, but appears Evil to Merlin). Optional **Evil** roles —
+  **Morgana**, **Mordred**, **Oberon**, **Lunatic** (must Fail every quest), and
+  **Brute** (may only Fail quests 1–3). The **Lancelots** toggle adds a paired
+  Good + Evil knight, where the Good Lancelot is allowed to play Fail. Loyal
+  Servants and Minions fill the remaining seats.
 - Night knowledge computed per device: Evil see each other (except Oberon),
   Merlin sees Evil except Mordred, Percival sees Merlin + Morgana unlabeled.
 - Quest team sizes per round and the **2-fail rule** on Quest 4 at 7+ players.
@@ -92,6 +91,22 @@ that folder in the Pages settings — paths stay relative.)
 - Evil wins on 3 failed quests or 5 rejected proposals in one round.
 - Good completing 3 quests triggers the **Assassination** phase.
 - Full role reveal on game over; Play Again keeps the same players.
+
+## Host options & extras
+
+- **Spectator / TV mode** — join as a watch-only spectator: a single-screen,
+  no-scroll public view (quest track, roster, vote tallies, phase status, and
+  the end-game reveal) that **never receives secret roles**. Designed for a
+  shared TV that stays on while everyone plays. Spectators can attach to a game
+  already in progress and don't count toward the player total.
+- **Proposal timer** — optional per-proposal countdown (1–5 minutes) shown in
+  sync to everyone; on time-out leadership passes to the next player with **no
+  penalty** (it never counts against the reject track).
+- **Show pending voters** — during the team vote, reveals *which* players still
+  owe a vote (never how anyone voted; chips are deliberately team-neutral).
+- **Re-check role** and **random leader order** toggles.
+- **Stats leaderboard** — per-room, stored in the host's browser: games played,
+  good/evil win rates, and per-player role records.
 
 ## Regenerating icons
 
