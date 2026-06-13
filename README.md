@@ -57,21 +57,6 @@ node scripts/test-engine.mjs
 node scripts/test-stats.mjs
 ```
 
-## Deploy to GitHub Pages
-
-This repo serves from the root, so:
-
-1. Push to GitHub (`main` branch).
-2. Repo **Settings → Pages → Build and deployment**: *Deploy from a branch*,
-   branch `main`, folder `/ (root)`.
-3. Your site appears at `https://<user>.github.io/localavalon/`.
-
-All asset paths, the service worker scope, and the manifest `start_url` are
-**relative**, so it works correctly under the `/localavalon/` subpath.
-
-(If you prefer a `/docs` folder deploy, move the files into `docs/` and pick
-that folder in the Pages settings — paths stay relative.)
-
 ## Game rules implemented
 
 - 5–10 players; Good:Evil splits 3:2 / 4:2 / 4:3 / 5:3 / 6:3 / 6:4.
