@@ -134,6 +134,28 @@ async function main() {
   handleClose(ctx, joiner);
   eq(e.count, before - 1, 'leaving the lobby frees the seat');
 
+  // --- SECURITY: no name-only seat reclaim once a game has started --------
+  // (a stranger must not be able to seize a disconnected player's seat — and
+  //  thus their secret role — just by knowing the public display name).
+  const o2 = new FakeWS('o2');
+  send(o2, { type: 'createRoom', name: 'Hank', clientId: 'c-h' });
+  const code2 = o2.byType.welcome.code;
+  ['Ivy', 'Jon', 'Kim', 'Vic'].forEach((nm, i) => {
+    const ws = new FakeWS(nm);
+    send(ws, { type: 'join', code: code2, name: nm, clientId: 'c2-' + i });
+  });
+  const room2 = ctx.manager.get(code2);
+  send(o2, { type: 'startGame' });           // deal roles -> phase leaves 'lobby'
+  ok(room2.engine.phase !== 'lobby', 'second room game started');
+  const vicId = room2.engine.players.find((p) => p.name === 'Vic').id;
+  room2.engine.markOffline(vicId);           // Vic drops — seat + secret role kept
+  const thief = new FakeWS('thief');
+  send(thief, { type: 'join', code: code2, name: 'Vic' });   // name-only, no clientId
+  ok(thief.byType.rejected && !thief.byType.welcome, 'mid-game name-only reclaim is rejected (no role theft)');
+  const vic2 = new FakeWS('vic2');
+  send(vic2, { type: 'join', code: code2, name: 'Vic', clientId: 'c2-3' }); // Vic's device
+  ok(vic2.byType.welcome && !vic2.byType.rejected, 'mid-game reclaim via matching clientId still works');
+
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exit(1);
 }

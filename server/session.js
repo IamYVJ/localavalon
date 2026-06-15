@@ -54,6 +54,12 @@ function normCode(c) {
   return (c == null ? '' : String(c)).replace(/\D/g, '').slice(0, 4);
 }
 
+// Clamp a user-supplied display name: strip control chars, trim, cap to 24 chars.
+// Defends against oversized names bloating broadcasts/stats and control chars in logs.
+function cleanName(s) {
+  return (s == null ? '' : String(s)).replace(/\p{Cc}/gu, '').trim().slice(0, 24);
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -146,7 +152,12 @@ function applyLobbyConfig(room, msg) {
 // Room entry handlers
 // ---------------------------------------------------------------------------
 function onCreateRoom(ctx, ws, msg) {
-  const name = (msg.name || '').trim();
+  // One room per connection — stops a single socket from spamming the room cap.
+  if (ws._code && ctx.manager.get(ws._code)) {
+    send(ws, { type: 'rejected', message: 'You already have a room on this connection.' });
+    return;
+  }
+  const name = cleanName(msg.name);
   if (!name) { send(ws, { type: 'rejected', message: 'Enter a name first.' }); return; }
   if (ctx.manager.size >= ctx.maxRooms) {
     send(ws, { type: 'rejected', message: 'Server is at capacity — try again shortly.' });
@@ -186,9 +197,24 @@ function onJoin(ctx, ws, msg) {
     return;
   }
 
-  const name = (msg.name || '').trim();
+  const name = cleanName(msg.name);
   const clientId = msg.clientId || null;
   const e = room.engine;
+
+  // SECURITY (server mode): once the game has started a seat holds a secret role,
+  // so reclaim is allowed ONLY via the stable clientId (same device/browser). Block
+  // a name-only reclaim of an offline seat — otherwise anyone who can see a
+  // disconnected player's (public) name could seize their seat and read their
+  // private role. In the lobby there are no roles yet, so name reclaim is fine.
+  // (The shared engine stays lenient for trusted P2P play; this guard is the
+  // server's stricter policy for untrusted public clients.)
+  if (e.phase !== 'lobby') {
+    const byClient = clientId ? e.players.find(p => p.clientId === clientId) : null;
+    if (!byClient && e.players.some(p => p.name.toLowerCase() === name.toLowerCase() && !p.online)) {
+      send(ws, { type: 'rejected', message: 'That player disconnected mid-game — rejoin from the same device/browser to reclaim the seat.' });
+      return;
+    }
+  }
 
   // Identify the seat this join will reclaim (if any), so we can retire its old
   // socket after the engine remaps the id (mirrors the host's connection-map

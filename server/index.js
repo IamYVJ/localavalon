@@ -10,10 +10,16 @@
 // Hardening:
 //   - Origin allowlist on the WS upgrade (ALLOWED_ORIGINS). Browsers always send
 //     Origin; header-less connections are allowed only OUTSIDE production so the
-//     local test harness works (NODE_ENV=production rejects them).
-//   - Per-IP concurrent-connection cap (reads X-Forwarded-For from the trusted
-//     local reverse proxy).
-//   - Room cap enforced in session.js (createRoom).
+//     local test harness works (NODE_ENV=production rejects them). NOTE: a
+//     non-browser client can forge Origin, so this is CSRF defence, not authn —
+//     the limits below are what actually bound abuse.
+//   - WS frame size cap (maxPayload) — game messages are tiny; reject giant frames.
+//   - Global connection cap (MAX_CONNS) — the load-bearing DoS guard. Per-IP cap
+//     is best-effort only: behind Tailscale Funnel the real client IP isn't
+//     exposed and X-Forwarded-For is client-spoofable, so it can't be trusted.
+//   - Per-connection message rate limit (token bucket) — floods are dropped, not
+//     amplified into a broadcast to every socket in the room.
+//   - Room cap (MAX_ROOMS) + one-room-per-connection enforced in session.js.
 //
 // Install this module's storage shim FIRST so ../js/stats.js works under Node.
 // ============================================================================
@@ -33,6 +39,10 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 const VERSION = process.env.APP_VERSION || 'dev';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://iamyvj.github.io')
   .split(',').map(s => s.trim()).filter(Boolean);
+const MAX_PAYLOAD = Number(process.env.MAX_PAYLOAD_BYTES) || 64 * 1024; // 64 KiB/frame
+const MAX_CONNS = Number(process.env.MAX_CONNS) || 200;                 // global backstop
+const MSG_RATE = Number(process.env.MSG_RATE_PER_SEC) || 20;            // sustained msgs/sec/conn
+const MSG_BURST = Number(process.env.MSG_BURST) || 40;                  // bucket size
 
 const manager = new RoomManager({ maxRooms: MAX_ROOMS });
 const ctx = { manager, maxRooms: MAX_ROOMS };
@@ -78,8 +88,9 @@ const server = http.createServer((req, res) => {
 // ---------------------------------------------------------------------------
 // WebSocket server
 // ---------------------------------------------------------------------------
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
 const ipCounts = new Map();
+let totalConns = 0;
 
 function ipOf(req) {
   const xff = req.headers['x-forwarded-for'];
@@ -91,24 +102,39 @@ server.on('upgrade', (req, socket, head) => {
   if (!originAllowed(req.headers.origin)) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n'); socket.destroy(); return;
   }
+  // Global cap first — this is the real backstop (per-IP is unreliable behind Funnel).
+  if (totalConns >= MAX_CONNS) {
+    socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n'); socket.destroy(); return;
+  }
   const ip = ipOf(req);
   const n = ipCounts.get(ip) || 0;
   if (n >= MAX_CONNS_PER_IP) {
     socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n'); socket.destroy(); return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
+    totalConns += 1;
     ipCounts.set(ip, n + 1);
     ws._ip = ip;
+    ws._tokens = MSG_BURST;        // per-connection message rate-limit bucket
+    ws._lastRefill = Date.now();
     wss.emit('connection', ws, req);
   });
 });
 
 wss.on('connection', (ws) => {
   ws.on('message', (data) => {
+    // Per-connection token-bucket rate limit — drop floods rather than amplify
+    // them into a broadcast to every socket in the room.
+    const now = Date.now();
+    ws._tokens = Math.min(MSG_BURST, ws._tokens + ((now - ws._lastRefill) / 1000) * MSG_RATE);
+    ws._lastRefill = now;
+    if (ws._tokens < 1) return;                  // too fast — drop silently
+    ws._tokens -= 1;
     // Never crash the process on a single malformed/hostile message.
     try { handleMessage(ctx, ws, data.toString()); } catch (_) { /* swallow */ }
   });
   ws.on('close', () => {
+    totalConns = Math.max(0, totalConns - 1);
     const ip = ws._ip;
     if (ip) {
       const c = (ipCounts.get(ip) || 1) - 1;
