@@ -172,6 +172,48 @@ export function joinHost(code, handlers = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// SERVER side — authoritative WebSocket server transport (Plan 2E).
+//
+// Mirrors joinHost()'s handle + handler shape so main.js can drive either
+// transport through the same client code path. The server speaks the SAME JSON
+// wire protocol the P2P host does (welcome/state/lobbyInfo/statsData/rejected/
+// error), so the receive handler is shared. Reconnect just re-opens the socket;
+// main.js re-sends the join/createRoom hello in onOpen.
+// ---------------------------------------------------------------------------
+export function serverTransport(url, handlers = {}) {
+  let ws = null;
+  let closedByUs = false;
+
+  const open = () => {
+    ws = new window.WebSocket(url);
+    ws.addEventListener('open', () => {
+      handlers.onNetStatus && handlers.onNetStatus('online');
+      handlers.onOpen && handlers.onOpen();
+    });
+    ws.addEventListener('message', (ev) => {
+      const msg = safeParse(ev.data);
+      if (msg) handlers.onData && handlers.onData(msg);
+    });
+    ws.addEventListener('close', () => { if (!closedByUs) handlers.onClose && handlers.onClose(); });
+    ws.addEventListener('error', (e) => handlers.onError && handlers.onError(e));
+  };
+  open();
+
+  return {
+    send(msg) { if (ws && ws.readyState === window.WebSocket.OPEN) trySend(ws, msg); },
+    isOpen() { return !!(ws && ws.readyState === window.WebSocket.OPEN); },
+    // Revive a dropped socket; onOpen (in main.js) replays the join hello so the
+    // server reclaims the seat/ownership by clientId.
+    reconnect() {
+      if (closedByUs) return;
+      const st = ws ? ws.readyState : window.WebSocket.CLOSED;
+      if (st === window.WebSocket.CLOSED || st === window.WebSocket.CLOSING) open();
+    },
+    destroy() { closedByUs = true; try { ws && ws.close(); } catch (_) {} },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // DISCOVERY side — find games on the broker without typing a code.
 //
 //   IMPORTANT: peer.listAllPeers() only returns data when the signaling broker

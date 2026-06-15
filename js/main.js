@@ -9,8 +9,9 @@
 // ============================================================================
 
 import { GameEngine } from './state.js';
-import { createHost, joinHost, createDiscovery, describePeerError, isRecoverableError, peerIdForCode } from './net.js';
+import { createHost, joinHost, serverTransport, createDiscovery, describePeerError, isRecoverableError, peerIdForCode } from './net.js';
 import { render } from './ui.js';
+import { SERVER_URL, SERVER_HEALTH } from './config.js';
 import { ROLE_COUNTS, ROLES, OPTIONAL_TOGGLES } from './rules.js';
 import {
   generateRoomCode, normalizeCode, copyText,
@@ -27,7 +28,9 @@ const root = document.getElementById('app');
 // ---------------------------------------------------------------------------
 const app = {
   screen: 'home',                 // home | join | connecting | game | spectator | error | hostleft | stats
-  me: { id: null, name: loadName(), isHost: false, isSpectator: false },
+  mode: 'p2p',                    // 'p2p' (PeerJS) | 'server' (authoritative WS) — Plan 2E
+  serverUp: false,                // set by the boot health check; gates "Host on server"
+  me: { id: null, name: loadName(), isHost: false, isSpectator: false, owner: false },
   spectatorMode: false,           // Join screen: connect as a watch-only TV spectator
   code: loadCode(),
   pub: null,
@@ -62,6 +65,7 @@ const app = {
 // Host-only runtime.
 let engine = null;
 let net = null;            // host or client handle
+let serverCreated = false; // server mode: first socket open sends createRoom, later opens send join
 let voteTimer = null;
 let questTimer = null;
 let proposalTimer = null;     // host-only: fires when the team-proposal countdown expires
@@ -425,7 +429,47 @@ function resumeHosting(code, snapshot, name, asSpectator = false) {
 }
 
 // ---------------------------------------------------------------------------
-// Join an existing game.
+// Host on the authoritative server (Plan 2E). The creator is the room OWNER but
+// is a CLIENT of the server — there is NO local engine. Everyone (the owner
+// included) uses the shared client receive/render path; owner controls go over
+// the wire (the server enforces them).
+// ---------------------------------------------------------------------------
+function hostOnServer() {
+  const asSpectator = !!app.spectatorMode;
+  const name = (app.me.name || '').trim() || (asSpectator ? 'Host' : '');
+  if (!name) { app.screen = 'home'; app.error = 'Enter a name first.'; draw(); return; }
+
+  app.mode = 'server';
+  app.me.name = name; if (name) saveName(name);
+  app.me.isHost = false; app.me.owner = false; app.me.isSpectator = asSpectator;
+  app.me.id = null; app.pub = null; app.priv = null;
+  app.error = '';
+  serverCreated = false;
+  clearSession();                  // server mode is not auto-resumed across reloads (v1)
+  app.screen = 'connecting';
+  draw();
+
+  net = serverTransport(SERVER_URL, {
+    onNetStatus: (status) => { app.netStatus = status; draw(); },
+    onOpen: () => {
+      const clientId = loadClientId();
+      if (!serverCreated) {
+        serverCreated = true;
+        net.send({ type: 'createRoom', name, clientId, asSpectator });
+      } else {
+        // Reconnect → reclaim ownership of the same room via clientId.
+        net.send({ type: 'join', code: app.code, name, clientId });
+      }
+    },
+    onData: (msg) => clientOnData(msg, asSpectator),
+    onClose: () => clientOnClose(),
+    onError: (err) => clientOnError(err),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Join an existing game. Server-first when the Pi is reachable; otherwise (or if
+// the room isn't on the server) the original PeerJS P2P path.
 // ---------------------------------------------------------------------------
 function startJoining(rawCode, rawName, asSpectator = false) {
   const name = (rawName || '').trim();
@@ -440,55 +484,107 @@ function startJoining(rawCode, rawName, asSpectator = false) {
   app.me.name = name; if (name) saveName(name);
   app.code = code; saveCode(code);
   app.me.isHost = false;
+  app.me.owner = false;
   app.me.isSpectator = asSpectator;
   app.error = '';
   app.screen = 'connecting';
-  saveSession({ mode: asSpectator ? 'spectate' : 'join', code, name: effectiveName });
   draw();
 
+  if (app.serverUp && SERVER_URL) joinViaServer(code, name, effectiveName, asSpectator);
+  else joinViaP2P(code, name, effectiveName, asSpectator);
+}
+
+// PeerJS peer-to-peer join — the original transport, behaviour unchanged.
+function joinViaP2P(code, name, effectiveName, asSpectator) {
+  app.mode = 'p2p';
+  saveSession({ mode: asSpectator ? 'spectate' : 'join', code, name: effectiveName });
   net = joinHost(code, {
     onOpen: () => net.send(asSpectator
       ? { type: 'spectate', name: effectiveName }
       : { type: 'join', name, clientId: loadClientId() }),
     onNetStatus: (status) => { app.netStatus = status; draw(); },
-    onData: (msg) => {
-      // Any message means the link is live again — cancel a pending retry loop.
-      stopClientReconnect();
-      switch (msg.type) {
-        case 'welcome':  app.me.id = msg.playerId; app.me.isSpectator = !!msg.spectator; break;
-        case 'state': {
-          app.pub = msg.pub; app.priv = asSpectator ? null : msg.priv;
-          // Spectators land on the dedicated TV view; players on the game board.
-          if (asSpectator) app.screen = 'spectator';
-          else if (app.screen !== 'stats') app.screen = 'game';
-          draw();
-          break;
-        }
-        case 'statsData': app.statsData = msg.data; app.screen = 'stats'; draw(); break;
-        case 'rejected': clearSession(); teardownNet(); app.screen = 'join'; app.error = msg.message; startDiscovery(); draw(); break;
-        case 'error':    app.error = msg.message; draw(); break;
-        default: break;
-      }
-    },
-    onClose: () => {
-      if (!net) return;                 // we tore the connection down ourselves
-      // The data channel dropped. If we had a live game, the host may just be
-      // briefly away (locked phone, tab switch) — retry before giving up.
-      if (app.pub) { startClientReconnect(); }
-      else { app.screen = 'error'; app.error = 'The host closed the connection.'; draw(); }
-    },
-    onError: (err) => {
-      if (!net) return;                 // torn down deliberately
-      // Mid-game: assume the host is briefly away and keep retrying until the
-      // attempt cap, rather than dropping straight to a fatal error screen.
-      if (app.pub && app.screen !== 'hostleft') { startClientReconnect(); return; }
-      if (!net.isOpen()) {
-        app.screen = 'error';
-        app.error = describePeerError(err);
-        draw();
-      }
-    },
+    onData: (msg) => clientOnData(msg, asSpectator),
+    onClose: () => clientOnClose(),
+    onError: (err) => clientOnError(err),
   });
+}
+
+// Authoritative WebSocket-server join. Falls back to a P2P join of the SAME code
+// if the server doesn't have that room, so server and P2P codes can coexist.
+function joinViaServer(code, name, effectiveName, asSpectator) {
+  app.mode = 'server';
+  clearSession();                  // server mode is not auto-resumed across reloads (v1)
+  let fellBack = false;
+  net = serverTransport(SERVER_URL, {
+    onNetStatus: (status) => { app.netStatus = status; draw(); },
+    onOpen: () => net.send(asSpectator
+      ? { type: 'spectate', code, name: effectiveName, clientId: loadClientId() }
+      : { type: 'join', code, name, clientId: loadClientId() }),
+    onData: (msg) => {
+      // Room not on the server → fall back to a P2P join of the same code.
+      if (!app.pub && msg.type === 'rejected' && /no game found/i.test(msg.message || '')) {
+        fellBack = true;
+        teardownNet();
+        joinViaP2P(code, name, effectiveName, asSpectator);
+        return;
+      }
+      clientOnData(msg, asSpectator);
+    },
+    onClose: () => { if (!fellBack) clientOnClose(); },
+    onError: (err) => { if (!fellBack) clientOnError(err); },
+  });
+}
+
+// Shared client receive handler. The server speaks the same wire protocol as the
+// P2P host, so both transports route here.
+function clientOnData(msg, asSpectator) {
+  stopClientReconnect();             // any message means the link is live
+  switch (msg.type) {
+    case 'welcome':
+      app.me.id = msg.playerId;
+      app.me.isSpectator = !!msg.spectator;
+      app.me.owner = !!msg.owner;    // server-mode room owner (P2P never sets this)
+      if (msg.code) { app.code = msg.code; saveCode(msg.code); }
+      break;
+    case 'state': {
+      app.pub = msg.pub; app.priv = asSpectator ? null : msg.priv;
+      if (app.me.owner && asSpectator) {
+        // A spectating owner uses the control screen for lobby/gameover and the
+        // TV view during play (mirrors the P2P spectating-host routing).
+        app.screen = (app.pub.phase !== 'lobby' && app.pub.phase !== 'gameover') ? 'spectator' : 'game';
+      } else if (asSpectator) {
+        app.screen = 'spectator';
+      } else if (app.screen !== 'stats') {
+        app.screen = 'game';
+      }
+      draw();
+      break;
+    }
+    case 'statsData': app.statsData = msg.data; app.screen = 'stats'; draw(); break;
+    case 'rejected': clearSession(); teardownNet(); app.screen = 'join'; app.error = msg.message; startDiscovery(); draw(); break;
+    case 'error':    app.error = msg.message; draw(); break;
+    default: break;
+  }
+}
+
+function clientOnClose() {
+  if (!net) return;                  // we tore the connection down ourselves
+  // The link dropped. If a game was live, the peer/server may be briefly away
+  // (locked phone, tab switch, funnel hiccup) — retry before giving up.
+  if (app.pub) { startClientReconnect(); }
+  else { app.screen = 'error'; app.error = 'The connection was closed.'; draw(); }
+}
+
+function clientOnError(err) {
+  if (!net) return;                  // torn down deliberately
+  // Mid-game: assume a brief outage and keep retrying until the attempt cap,
+  // rather than dropping straight to a fatal error screen.
+  if (app.pub && app.screen !== 'hostleft') { startClientReconnect(); return; }
+  if (!net.isOpen()) {
+    app.screen = 'error';
+    app.error = describePeerError(err);
+    draw();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -612,8 +708,24 @@ window.addEventListener('online', wakeConnection);
 // client intents go over the wire.
 // ---------------------------------------------------------------------------
 function sendIntent(msg) {
-  if (app.me.isHost) handleIntent(app.me.id, msg);
-  else if (net) net.send(msg);
+  if (app.mode === 'server') { if (net) net.send(msg); return; }   // owner & players send over the wire
+  if (app.me.isHost) handleIntent(app.me.id, msg);                 // P2P host: straight through the local engine
+  else if (net) net.send(msg);                                     // P2P client
+}
+
+// Server mode: push the owner's full lobby config in one message. The server
+// applies it and broadcasts the recomputed role config back in `state`.
+function sendServerLobbyConfig() {
+  if (!net) return;
+  net.send({
+    type: 'lobbyConfig',
+    toggles: app.toggles,
+    allowReveal: app.allowReveal,
+    randomLeaderOrder: app.randomLeaderOrder,
+    questTimerEnabled: app.questTimerEnabled,
+    questTimerSeconds: app.questTimerSeconds,
+    showPendingVoters: app.showPendingVoters,
+  });
 }
 
 const intents = {
@@ -628,9 +740,11 @@ const intents = {
     stopDiscovery();
     clearSession();
     engine = null;
+    app.mode = 'p2p';
+    serverCreated = false;
     app.screen = 'home';
     app.pub = null; app.priv = null; app.error = '';
-    app.me.isHost = false; app.me.id = null; app.me.isSpectator = false;
+    app.me.isHost = false; app.me.id = null; app.me.isSpectator = false; app.me.owner = false;
     app.spectatorMode = false;
     app.confirmEndGame = false;
     app.confirmLeaveGame = false;
@@ -641,6 +755,7 @@ const intents = {
   toggleSpectatorMode: () => { app.spectatorMode = !app.spectatorMode; app.error = ''; draw(); },
 
   host: () => startHosting(),
+  hostOnServer: () => hostOnServer(),
   join: (code, name) => startJoining(code, name),
   spectate: (code, name) => startJoining(code, name, true),
 
@@ -654,48 +769,56 @@ const intents = {
 
   // Host-only lobby controls
   toggleRole: (id) => {
+    if (app.mode === 'server') { if (!app.me.owner) return; app.toggles[id] = !app.toggles[id]; sendServerLobbyConfig(); draw(); return; }
     app.toggles[id] = !app.toggles[id];
     rebuildConfig();
     hostSync();
   },
   toggleReveal: () => {
+    if (app.mode === 'server') { if (!app.me.owner) return; app.allowReveal = !app.allowReveal; sendServerLobbyConfig(); draw(); return; }
     if (!app.me.isHost || !engine) return;
     app.allowReveal = !app.allowReveal;
     engine.setAllowReveal(app.allowReveal);
     hostSync();
   },
   toggleRandomLeader: () => {
+    if (app.mode === 'server') { if (!app.me.owner) return; app.randomLeaderOrder = !app.randomLeaderOrder; sendServerLobbyConfig(); draw(); return; }
     if (!app.me.isHost || !engine) return;
     app.randomLeaderOrder = !app.randomLeaderOrder;
     engine.setRandomLeaderOrder(app.randomLeaderOrder);
     hostSync();
   },
   toggleQuestTimer: () => {
+    if (app.mode === 'server') { if (!app.me.owner) return; app.questTimerEnabled = !app.questTimerEnabled; sendServerLobbyConfig(); draw(); return; }
     if (!app.me.isHost || !engine) return;
     app.questTimerEnabled = !app.questTimerEnabled;
     engine.setQuestTimer(app.questTimerEnabled, app.questTimerSeconds);
     hostSync();
   },
   setQuestTimerMinutes: (min) => {
-    if (!app.me.isHost || !engine) return;
     const seconds = Math.min(300, Math.max(60, Math.round(min * 60)));
+    if (app.mode === 'server') { if (!app.me.owner) return; app.questTimerSeconds = seconds; sendServerLobbyConfig(); draw(); return; }
+    if (!app.me.isHost || !engine) return;
     app.questTimerSeconds = seconds;
     engine.setQuestTimer(app.questTimerEnabled, seconds);
     hostSync();
   },
   toggleShowPendingVoters: () => {
+    if (app.mode === 'server') { if (!app.me.owner) return; app.showPendingVoters = !app.showPendingVoters; sendServerLobbyConfig(); draw(); return; }
     if (!app.me.isHost || !engine) return;
     app.showPendingVoters = !app.showPendingVoters;
     engine.setShowPendingVoters(app.showPendingVoters);
     hostSync();
   },
   startGame: () => {
+    if (app.mode === 'server') { if (app.me.owner) sendIntent({ type: 'startGame' }); return; }
     if (!app.me.isHost) return;
     const r = engine.startGame();
     if (!r.ok) { app.error = r.error; draw(); return; }
     hostSync();
   },
   playAgain: () => {
+    if (app.mode === 'server') { if (app.me.owner) sendIntent({ type: 'playAgain' }); return; }
     if (!app.me.isHost) return;
     app._gameRecorded = false;
     engine.playAgain();
@@ -706,11 +829,12 @@ const intents = {
   // Host-only: end the current game at any point and return everyone to the
   // lobby. A two-step action — the first tap opens a confirmation modal, the
   // second (confirm) actually ends the game.
-  requestEndGame: () => { if (app.me.isHost) { app.confirmEndGame = true; draw(); } },
+  requestEndGame: () => { if (app.me.isHost || app.me.owner) { app.confirmEndGame = true; draw(); } },
   cancelEndGame:  () => { app.confirmEndGame = false; draw(); },
   endGame: () => {
-    if (!app.me.isHost || !engine) return;
     app.confirmEndGame = false;
+    if (app.mode === 'server') { if (app.me.owner) sendIntent({ type: 'endGame' }); return; }
+    if (!app.me.isHost || !engine) return;
     app._gameRecorded = false;
     // Drop any pending reveal/advance timers from the game we're aborting so a
     // late timeout can't mutate the fresh lobby (they no-op on phase mismatch
@@ -728,7 +852,7 @@ const intents = {
   // returns home, but the host HOLDS the seat (marks it offline) while the game
   // is in progress, so the player can rejoin from the same device by entering
   // the same name + room code — the engine reclaims their seat and role by name.
-  requestLeaveGame: () => { if (!app.me.isHost) { app.confirmLeaveGame = true; draw(); } },
+  requestLeaveGame: () => { if (!app.me.isHost && !app.me.owner) { app.confirmLeaveGame = true; draw(); } },
   cancelLeaveGame:  () => { app.confirmLeaveGame = false; draw(); },
   leaveGame: () => {
     app.confirmLeaveGame = false;
@@ -803,6 +927,21 @@ function resumeSession() {
 }
 
 if (!resumeSession()) draw();
+
+// Probe the authoritative server so the home screen can offer "Host on server".
+// Purely additive: if it's unreachable the app stays exactly as it is (P2P only).
+async function checkServer() {
+  if (!SERVER_URL || !SERVER_HEALTH) return;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    const res = await fetch(SERVER_HEALTH, { signal: ctrl.signal, cache: 'no-store' });
+    clearTimeout(t);
+    app.serverUp = !!(res && res.ok);
+  } catch (_) { app.serverUp = false; }
+  if (app.serverUp && app.screen === 'home') draw();   // reveal the button if still on home
+}
+checkServer();
 
 // Service worker (relative path so it works under a GitHub Pages subpath).
 // Goal: never serve a stale build, but only ever auto-reload when there is an

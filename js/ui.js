@@ -58,13 +58,15 @@ export function render(root, app, intents) {
   // (ends for everyone); every other PLAYER gets "Leave game" (just themselves).
   // It overlays both the game board and a spectating host's TV view.
   const inActiveGame = app.pub && app.pub.phase !== 'lobby' && app.pub.phase !== 'gameover';
-  if (app.me.isHost && inActiveGame) {
+  // "Can control the room" = P2P host OR server-mode owner.
+  const canControl = app.me.isHost || app.me.owner;
+  if (canControl && inActiveGame) {
     root.appendChild(el('button', {
       class: 'exit-btn',
       title: 'End the game and send everyone back to the lobby',
       onclick: () => intents.requestEndGame(),
     }, '✕ END GAME'));
-  } else if (!app.me.isHost && !app.me.isSpectator && app.me.id && inActiveGame) {
+  } else if (!canControl && !app.me.isSpectator && app.me.id && inActiveGame) {
     root.appendChild(el('button', {
       class: 'exit-btn',
       title: 'Leave the game (you can rejoin with the same name and code)',
@@ -77,7 +79,7 @@ export function render(root, app, intents) {
   // once the game starts. Pin it bottom-left (top-right is the exit button,
   // bottom-centre the reconnect banner) so a player can always read or share it.
   // Tap to copy.
-  if (!app.me.isHost && app.code && (app.screen === 'game' || app.screen === 'spectator')) {
+  if (!canControl && app.code && (app.screen === 'game' || app.screen === 'spectator')) {
     root.appendChild(el('button', {
       class: 'code-footer', title: 'Room code — tap to copy',
       onclick: () => intents.copyCode && intents.copyCode(),
@@ -88,7 +90,7 @@ export function render(root, app, intents) {
   }
 
   // Confirmation modals ("are you sure?").
-  if (app.me.isHost && app.confirmEndGame) {
+  if (canControl && app.confirmEndGame) {
     root.appendChild(confirmModal({
       title: 'End this game?',
       body: 'This ends the current game for everyone and returns all players to the lobby. '
@@ -99,7 +101,7 @@ export function render(root, app, intents) {
       onCancel: () => intents.cancelEndGame(),
     }));
   }
-  if (!app.me.isHost && app.confirmLeaveGame) {
+  if (!canControl && app.confirmLeaveGame) {
     root.appendChild(confirmModal({
       title: 'Leave the game?',
       body: 'You\'ll return to the home screen. While the game is in progress your seat is held, '
@@ -181,12 +183,20 @@ function homeScreen(app, intents) {
     el('div', { class: 'field-group' }, nameInput),
     el('div', { class: 'toggle-list' }, spectatorToggle),
     el('div', { class: 'btn-row' },
-      el('button', { class: 'btn btn-primary', onclick: () => intents.host() },
-        hostSpectate ? '▷ HOST AS SPECTATOR' : '> HOST GAME'),
+      app.serverUp
+        ? el('button', { class: 'btn btn-primary', onclick: () => intents.hostOnServer() },
+            hostSpectate ? '▷ HOST ON SERVER (TV)' : '> HOST ON SERVER')
+        : null,
+      el('button', { class: app.serverUp ? 'btn btn-secondary' : 'btn btn-primary', onclick: () => intents.host() },
+        app.serverUp
+          ? (hostSpectate ? '▷ HOST AS SPECTATOR (P2P)' : '> HOST (P2P)')
+          : (hostSpectate ? '▷ HOST AS SPECTATOR' : '> HOST GAME')),
       el('button', { class: 'btn btn-secondary', onclick: () => intents.gotoJoin() }, '▷ JOIN GAME'),
     ),
     el('button', { class: 'link-btn', onclick: () => intents.gotoHowTo() }, '? How to play'),
-    el('p', { class: 'fine' }, 'Plays peer-to-peer in your browser. No accounts, no servers.'),
+    el('p', { class: 'fine' }, app.serverUp
+      ? 'Server mode is online for smoother cross-network play. Peer-to-peer also works on the same Wi-Fi.'
+      : 'Plays peer-to-peer in your browser. No accounts, no sign-ups.'),
   );
 }
 
@@ -447,7 +457,7 @@ function gameScreen(app, intents) {
 // ---------------------------------------------------------------------------
 function lobbyScreen(app, intents) {
   const pub = app.pub;
-  const isHost = app.me.isHost;
+  const isHost = app.me.isHost || app.me.owner;   // owner controls the lobby in server mode
   const players = pub.players;
 
   const roster = el('ul', { class: 'roster' },
@@ -1052,7 +1062,7 @@ function gameOverScreen(app, intents) {
     table,
   ];
 
-  if (app.me.isHost) {
+  if (app.me.isHost || app.me.owner) {
     children.push(el('div', { class: 'btn-row' },
       el('button', { class: 'btn btn-primary', onclick: intents.playAgain }, '> PLAY AGAIN'),
       el('button', { class: 'btn btn-secondary', onclick: intents.viewStats }, 'STATS'),
