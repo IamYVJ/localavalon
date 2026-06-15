@@ -1,0 +1,16 @@
+# Keep the Docker build context small. The server image only needs js/ and
+# server/ (see server/Dockerfile); everything else is irrelevant to the build.
+.git
+.github
+node_modules
+**/node_modules
+docs
+icons
+css
+scripts
+*.md
+*.log
+.claude
+sw.js
+manifest.webmanifest
+index.html

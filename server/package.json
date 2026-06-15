@@ -1,0 +1,17 @@
+{
+  "name": "avalon-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Authoritative WebSocket server for The Resistance: Avalon. Reuses the browser game engine (../js/state.js, ../js/rules.js, ../js/stats.js) and acts as the host for every room.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "8.18.0"
+  }
+}
