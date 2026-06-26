@@ -80,6 +80,14 @@ let discoveryTimer = null;
 // Client-only: retry loop that revives a dropped connection mid-game.
 let clientReconnectTimer = null;
 
+// Client-only: a server-mode join falls back to P2P if the server doesn't accept
+// (or reject) us before this fires. Covers a failed/raced boot health check so a
+// joiner is never stranded on the P2P-only path for a server-hosted room. Kept
+// generous so a slow-but-working Funnel connection isn't abandoned prematurely
+// (a premature fallback would itself fail for a server room).
+let serverJoinFallbackTimer = null;
+const SERVER_JOIN_FALLBACK_MS = 5000;
+
 // ---------------------------------------------------------------------------
 // Render wrapper — keeps a little local UI bookkeeping in sync first.
 // ---------------------------------------------------------------------------
@@ -490,7 +498,12 @@ function startJoining(rawCode, rawName, asSpectator = false) {
   app.screen = 'connecting';
   draw();
 
-  if (app.serverUp && SERVER_URL) joinViaServer(code, name, effectiveName, asSpectator);
+  // Always try the server first when one is configured — it has its own P2P
+  // fallback (see joinViaServer). We must NOT gate this on the racy one-shot
+  // `serverUp` health flag: a joiner whose boot health check timed out (slow
+  // network / Funnel cold start) would otherwise go straight to P2P and could
+  // never reach a server-hosted room, surfacing as "No game found with that code".
+  if (SERVER_URL) joinViaServer(code, name, effectiveName, asSpectator);
   else joinViaP2P(code, name, effectiveName, asSpectator);
 }
 
@@ -510,28 +523,51 @@ function joinViaP2P(code, name, effectiveName, asSpectator) {
 }
 
 // Authoritative WebSocket-server join. Falls back to a P2P join of the SAME code
-// if the server doesn't have that room, so server and P2P codes can coexist.
+// when the server doesn't have that room OR is unreachable for this client, so
+// server and P2P codes can coexist and a flaky/raced health check can't strand a
+// joiner. `committed` flips once the server actually responds (so later events
+// route normally); `fellBack` flips once we've switched to P2P (so stale events
+// from the abandoned server socket are ignored).
 function joinViaServer(code, name, effectiveName, asSpectator) {
   app.mode = 'server';
   clearSession();                  // server mode is not auto-resumed across reloads (v1)
+  let committed = false;
   let fellBack = false;
+
+  const clearFallbackTimer = () => {
+    if (serverJoinFallbackTimer) { clearTimeout(serverJoinFallbackTimer); serverJoinFallbackTimer = null; }
+  };
+  const fallback = () => {
+    if (committed || fellBack) return;
+    fellBack = true;
+    clearFallbackTimer();
+    teardownNet();
+    joinViaP2P(code, name, effectiveName, asSpectator);
+  };
+
+  clearFallbackTimer();
+  serverJoinFallbackTimer = setTimeout(fallback, SERVER_JOIN_FALLBACK_MS);
+
   net = serverTransport(SERVER_URL, {
     onNetStatus: (status) => { app.netStatus = status; draw(); },
     onOpen: () => net.send(asSpectator
       ? { type: 'spectate', code, name: effectiveName, clientId: loadClientId() }
       : { type: 'join', code, name, clientId: loadClientId() }),
     onData: (msg) => {
-      // Room not on the server → fall back to a P2P join of the same code.
-      if (!app.pub && msg.type === 'rejected' && /no game found/i.test(msg.message || '')) {
-        fellBack = true;
-        teardownNet();
-        joinViaP2P(code, name, effectiveName, asSpectator);
-        return;
+      if (fellBack) return;        // stale frame from the socket we're abandoning
+      if (!committed) {
+        // Room not on the server → fall back to a P2P join of the same code.
+        if (msg.type === 'rejected' && /no game found/i.test(msg.message || '')) { fallback(); return; }
+        // Any other response means the server is reachable and handling us.
+        committed = true;
+        clearFallbackTimer();
       }
       clientOnData(msg, asSpectator);
     },
-    onClose: () => { if (!fellBack) clientOnClose(); },
-    onError: (err) => { if (!fellBack) clientOnError(err); },
+    // Before the server responds, a close/error means it's unreachable → P2P.
+    // After it has, hand off to the normal mid-game reconnect/error handling.
+    onClose: () => { if (fellBack) return; if (committed) clientOnClose(); else fallback(); },
+    onError: (err) => { if (fellBack) return; if (committed) clientOnError(err); else fallback(); },
   });
 }
 
@@ -647,6 +683,7 @@ function teardownNet() {
   try { if (net) net.destroy(); } catch (_) {}
   net = null;
   stopClientReconnect();
+  if (serverJoinFallbackTimer) { clearTimeout(serverJoinFallbackTimer); serverJoinFallbackTimer = null; }
   if (voteTimer) { clearTimeout(voteTimer); voteTimer = null; }
   if (questTimer) { clearTimeout(questTimer); questTimer = null; }
   if (proposalTimer) { clearTimeout(proposalTimer); proposalTimer = null; }
@@ -730,6 +767,11 @@ function sendServerLobbyConfig() {
 
 const intents = {
   setName: (n) => { app.me.name = n; saveName(n); },
+  // Keep the join-screen code field in sync with app state as the user types, so
+  // a re-render (e.g. discovery resolving) rebuilds the input with the CURRENT
+  // value instead of reverting it to the last-saved code. No draw() — the DOM
+  // value is already set by the field's own handler; this just prevents clobber.
+  setCode: (c) => { app.code = (c || '').replace(/\D/g, '').slice(0, 4); },
   gotoJoin: () => { app.screen = 'join'; app.error = ''; startDiscovery(); draw(); },
   // How-to-play: remember where we came from so the back button returns there
   // (the link lives on both the home and join screens).

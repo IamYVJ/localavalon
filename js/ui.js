@@ -214,7 +214,11 @@ function joinScreen(app, intents) {
     maxlength: '4', placeholder: '1234',
     value: app.code || '', autocomplete: 'off',
     'aria-label': 'Room code',
-    oninput: (e) => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4); },
+    oninput: (e) => {
+      const v = e.target.value.replace(/\D/g, '').slice(0, 4);
+      e.target.value = v;
+      intents.setCode(v);
+    },
   });
 
   const spectate = !!app.spectatorMode;
