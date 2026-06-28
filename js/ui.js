@@ -74,13 +74,14 @@ export function render(root, app, intents) {
     }, '✕ LEAVE GAME'));
   }
 
-  // Floating room-code chip for non-host players: the host sees the code on their
-  // lobby card, but a joined player has no on-screen reminder once the game starts.
-  // Pin it bottom-left (top-right is the exit button, bottom-centre the reconnect
-  // banner) so a player can always read or share it. Tap to copy. The spectator/TV
-  // screen is deliberately excluded — it already shows the code in its header
-  // (.tv-code, top-right), so a duplicate chip bottom-left would be redundant.
-  if (!canControl && app.code && app.screen === 'game') {
+  // Floating room-code chip, shown to EVERYONE on the game screen — host and
+  // joined players alike. The lobby card only shows the code during the lobby
+  // phase, so once play starts nobody (not even the host) has an on-screen
+  // reminder otherwise. Pin it bottom-left (top-right is the exit button,
+  // bottom-centre the reconnect banner) so anyone can read or share it. Tap to
+  // copy. The spectator/TV screen is the one exclusion — it already shows the
+  // code in its header (.tv-code, top-right), so a duplicate chip is redundant.
+  if (app.code && app.screen === 'game') {
     root.appendChild(el('button', {
       class: 'code-footer', title: 'Room code — tap to copy',
       onclick: () => intents.copyCode && intents.copyCode(),
