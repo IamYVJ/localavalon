@@ -28,7 +28,8 @@ export function render(root, app, intents) {
     case 'home':       node = homeScreen(app, intents); break;
     case 'join':       node = joinScreen(app, intents); break;
     case 'howto':      node = howToScreen(app, intents); break;
-    case 'connecting': node = infoScreen('Connecting…', `Reaching room ${app.code}.`, true); break;
+    case 'connecting': node = infoScreen('Connecting…',
+                                          app.code ? `Reaching room ${app.code}.` : 'Setting up your room…', true); break;
     case 'error':      node = errorScreen(app, intents); break;
     case 'hostleft':   node = infoScreen('Host left', 'The host ended the game. Thanks for playing.', false,
                                           el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '> BACK HOME')); break;

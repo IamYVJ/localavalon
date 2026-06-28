@@ -455,6 +455,11 @@ function hostOnServer() {
   app.me.id = null; app.pub = null; app.priv = null;
   app.error = '';
   serverCreated = false;
+  // We're creating a BRAND-NEW room — we don't have its code yet (the server
+  // assigns it and sends it back in `welcome`). Drop any leftover code from a
+  // previous game/session so the "Connecting…" screen doesn't flash the old
+  // room code while we wait for the server to mint the new one.
+  app.code = '';
   clearSession();                  // server mode is not auto-resumed across reloads (v1)
   app.screen = 'connecting';
   draw();
