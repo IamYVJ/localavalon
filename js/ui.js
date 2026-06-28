@@ -74,12 +74,13 @@ export function render(root, app, intents) {
     }, '✕ LEAVE GAME'));
   }
 
-  // Floating room-code chip for non-host players (and spectators): the host sees
-  // the code on their lobby card, but a joined player has no on-screen reminder
-  // once the game starts. Pin it bottom-left (top-right is the exit button,
-  // bottom-centre the reconnect banner) so a player can always read or share it.
-  // Tap to copy.
-  if (!canControl && app.code && (app.screen === 'game' || app.screen === 'spectator')) {
+  // Floating room-code chip for non-host players: the host sees the code on their
+  // lobby card, but a joined player has no on-screen reminder once the game starts.
+  // Pin it bottom-left (top-right is the exit button, bottom-centre the reconnect
+  // banner) so a player can always read or share it. Tap to copy. The spectator/TV
+  // screen is deliberately excluded — it already shows the code in its header
+  // (.tv-code, top-right), so a duplicate chip bottom-left would be redundant.
+  if (!canControl && app.code && app.screen === 'game') {
     root.appendChild(el('button', {
       class: 'code-footer', title: 'Room code — tap to copy',
       onclick: () => intents.copyCode && intents.copyCode(),
@@ -1105,7 +1106,7 @@ function spectatorScreen(app, intents) {
 
   // Game over: hand the whole stage to the winner banner + full role reveal.
   if (pub.phase === 'gameover') {
-    return el('main', { class: 'tv-shell tv-over' }, head, tvGameOver(pub),
+    return el('main', { class: 'tv-shell tv-over' }, head, tvGameOver(pub, app.tvStats),
       liveRegion(pub.winner === 'evil' ? 'Evil wins' : 'Good wins'));
   }
 
@@ -1310,8 +1311,9 @@ function tvStatus(app) {
   }
 }
 
-// Game-over stage for the TV: winner banner + full role reveal (public now).
-function tvGameOver(pub) {
+// Game-over stage for the TV: winner banner + full role reveal (public now) +
+// the room's per-player standings (once the stats reply lands — see tvEndStats).
+function tvGameOver(pub, stats) {
   const evilWon = pub.winner === 'evil';
   const cards = (pub.reveal || []).map(r => el('div', { class: 'tv-reveal-card ' + (r.team === 'evil' ? 'evil' : 'good') },
     el('span', { class: 'tv-reveal-name' }, r.name + (r.id === pub.assassinTargetId ? ' 🗡' : '')),
@@ -1325,6 +1327,95 @@ function tvGameOver(pub) {
       el('div', { class: 'tv-win-reason' }, pub.winReason || ''),
     ),
     el('div', { class: 'tv-reveal-grid', 'data-n': String((pub.reveal || []).length) }, ...cards),
+    tvEndStats(stats),
+  );
+}
+
+// Per-player standings beneath the reveal on the TV end screen. Shows the room's
+// running leaderboard: the FULL column set (games / wins / win% + Good/Evil split
+// and each player's most-played role) when there are few enough players to fit,
+// otherwise a COMPACT cumulative view (games / wins / win%). Rows are capped at
+// the top 10 by wins and the block is overflow-clipped, so the no-scroll TV layout
+// never breaks. Renders nothing until the stats reply lands (or if no games are on
+// record yet — e.g. server stats reset on restart).
+function tvEndStats(stats) {
+  if (!stats || !stats.leaderboard || stats.leaderboard.length === 0) return null;
+  const summary = stats.summary || { gamesPlayed: 0, goodWins: 0, evilWins: 0 };
+  const lb = stats.leaderboard.slice(0, 10);   // top-10 by wins; bounds height on a TV
+  const full = lb.length <= 8;                 // space heuristic: full detail for typical games
+
+  // A player's most-played role, e.g. "Merlin ×3 · 67%" — a light touch of the
+  // per-role breakdown without a full sub-table (full mode only).
+  const topRole = (roles) => {
+    let best = null;
+    for (const [rid, r] of Object.entries(roles || {})) {
+      if (r.played > 0 && (!best || r.played > best.played)) best = { rid, played: r.played, wins: r.wins };
+    }
+    if (!best) return null;
+    const def = ROLES[best.rid];
+    const pct = best.played > 0 ? Math.round((best.wins / best.played) * 100) : 0;
+    return `${def ? def.name : best.rid} ×${best.played} · ${pct}%`;
+  };
+
+  const head = () => full
+    ? el('tr', {},
+        el('th', { class: 'tv-lb-rank' }, '#'), el('th', { class: 'tv-lb-name' }, 'Player'),
+        el('th', {}, 'GP'), el('th', {}, 'W'), el('th', {}, 'Win%'),
+        el('th', {}, 'Good'), el('th', {}, 'Evil'), el('th', {}, 'GW'), el('th', {}, 'EW'))
+    : el('tr', {},
+        el('th', { class: 'tv-lb-rank' }, '#'), el('th', { class: 'tv-lb-name' }, 'Player'),
+        el('th', {}, 'GP'), el('th', {}, 'W'), el('th', {}, 'Win%'));
+
+  // One standings table for a slice of the board. `start` is the 0-based index of
+  // the slice's first player so ranks stay continuous when compact mode splits the
+  // board into side-by-side columns.
+  const table = (slice, start) => {
+    const rows = slice.map((p, j) => {
+      const i = start + j;
+      const roleStr = full ? topRole(p.roles) : null;
+      const nameCell = el('td', { class: 'tv-lb-name' },
+        el('span', { class: 'tv-lb-pname' }, p.name),
+        roleStr ? el('span', { class: 'tv-lb-role' }, roleStr) : null,
+      );
+      const common = [
+        el('td', { class: 'tv-lb-rank' }, String(i + 1)),
+        nameCell,
+        el('td', {}, String(p.gamesPlayed)),
+        el('td', {}, String(p.wins)),
+        el('td', {}, p.winPct + '%'),
+      ];
+      const extra = full ? [
+        el('td', {}, String(p.good)),
+        el('td', {}, String(p.evil)),
+        el('td', {}, String(p.goodWins)),
+        el('td', {}, String(p.evilWins)),
+      ] : [];
+      return el('tr', { class: i === 0 ? 'tv-lb-top' : '' }, ...common, ...extra);
+    });
+    return el('table', { class: 'tv-lb' }, el('thead', {}, head()), el('tbody', {}, ...rows));
+  };
+
+  // Full → a single table. Compact (many players) → two columns side by side so
+  // the whole roster fits the no-scroll viewport (a 10-row table can't coexist
+  // with a full 10-player reveal otherwise).
+  let board;
+  if (full) {
+    board = table(lb, 0);
+  } else {
+    const half = Math.ceil(lb.length / 2);
+    board = el('div', { class: 'tv-lb-cols' }, table(lb.slice(0, half), 0), table(lb.slice(half), half));
+  }
+
+  return el('section', { class: 'tv-endstats ' + (full ? 'full' : 'compact') },
+    el('div', { class: 'tv-endstats-head' },
+      el('span', { class: 'tv-endstats-label' }, 'STANDINGS'),
+      el('span', { class: 'tv-endstats-sub' },
+        `${summary.gamesPlayed} game${summary.gamesPlayed === 1 ? '' : 's'} · `,
+        el('span', { class: 'good' }, `Good ${summary.goodWins}`), ' · ',
+        el('span', { class: 'evil' }, `Evil ${summary.evilWins}`),
+      ),
+    ),
+    el('div', { class: 'tv-endstats-wrap' }, board),
   );
 }
 

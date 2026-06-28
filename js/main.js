@@ -52,7 +52,9 @@ const app = {
   discovered: [],            // [{ code, hostName, playerCount, phase, joinable }]
   discoveryState: 'idle',    // idle | searching | ok | unsupported
   // Statistics / leaderboard state.
-  statsData: null,           // { summary, leaderboard } from getLeaderboard()
+  statsData: null,           // { summary, leaderboard } from getLeaderboard() — drives the 'stats' screen
+  tvStats: null,             // { summary, leaderboard } shown INLINE on the spectator end screen (no screen switch)
+  _tvStatsPending: false,    // true while the spectator end screen awaits its stats reply (dedupes the request)
   _gameRecorded: false,      // prevents double-recording the same game
   questNotice: null,         // transient nudge when a player taps a card they can't play
   confirmEndGame: false,     // host-only: "are you sure?" modal before ending the game
@@ -593,10 +595,35 @@ function clientOnData(msg, asSpectator) {
       } else if (app.screen !== 'stats') {
         app.screen = 'game';
       }
+      // Spectator end screen: a PURE spectator (watch-only, not the owner) pulls the
+      // room leaderboard ONCE at game over so standings can render under the reveal —
+      // without the statsData handler's usual hop to the dedicated 'stats' screen.
+      // Cleared whenever we leave game over so the next game refetches fresh numbers.
+      const pureSpectator = asSpectator && !app.me.owner;
+      if (pureSpectator && app.pub.phase === 'gameover') {
+        if (!app.tvStats && !app._tvStatsPending && net) {
+          app._tvStatsPending = true;
+          net.send({ type: 'requestStats' });
+        }
+      } else if (app.tvStats || app._tvStatsPending) {
+        app.tvStats = null;
+        app._tvStatsPending = false;
+      }
       draw();
       break;
     }
-    case 'statsData': app.statsData = msg.data; app.screen = 'stats'; draw(); break;
+    case 'statsData':
+      // A pure spectator only ever requests stats for the inline end-screen standings,
+      // so keep them on the TV view. Everyone else (players, the server-mode owner)
+      // gets the full dedicated 'stats' screen as before.
+      if (asSpectator && !app.me.owner) {
+        app._tvStatsPending = false;
+        app.tvStats = msg.data;
+        draw();
+      } else {
+        app.statsData = msg.data; app.screen = 'stats'; draw();
+      }
+      break;
     case 'rejected': clearSession(); teardownNet(); app.screen = 'join'; app.error = msg.message; startDiscovery(); draw(); break;
     case 'error':    app.error = msg.message; draw(); break;
     default: break;

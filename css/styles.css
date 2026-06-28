@@ -473,7 +473,9 @@ body {
 .win-banner.evil .win-side { color: var(--evil); }
 .win-reason { font-family: var(--mono); font-size: 13px; color: var(--muted); margin-top: 8px; letter-spacing: 0.04em; }
 
-.reveal-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+/* A line gap after the player-roles table separates the reveal from the
+   buttons / "waiting for host" line that follow it on the game-over screen. */
+.reveal-table { width: 100%; border-collapse: collapse; font-size: 14px; margin-bottom: 16px; }
 .reveal-table th {
   text-align: left; font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
   color: var(--muted); text-transform: uppercase; padding: 8px 10px; border-bottom: 1px solid var(--border-soft);
@@ -825,6 +827,48 @@ body {
 .tv-reveal-card.evil { border-left: 4px solid var(--evil); }
 .tv-reveal-name { font-family: var(--serif); font-size: clamp(16px, 1.8vw, 26px); }
 .tv-reveal-role { font-family: var(--mono); font-size: clamp(12px, 1.2vw, 16px); color: var(--muted); }
+
+/* Per-player standings under the reveal. The reveal grid takes only the height its
+   cards need (no greedy fill / empty gap); the standings panel claims the rest, so
+   every row stays visible. Both clip rather than scroll on a wall TV. */
+.tv-body-over .tv-reveal-grid { flex: 0 1 auto; }
+.tv-endstats {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: clamp(6px, 1vh, 12px);
+  overflow: hidden;
+}
+.tv-endstats-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.tv-endstats-label {
+  font: 700 clamp(11px, 1.1vw, 15px)/1 var(--mono);
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted);
+}
+.tv-endstats-sub { font: 600 clamp(11px, 1.1vw, 15px)/1 var(--mono); color: var(--muted); }
+.tv-endstats-sub .good { color: var(--accent); }
+.tv-endstats-sub .evil { color: var(--evil); }
+.tv-endstats-wrap { flex: 1; min-height: 0; overflow: hidden; }
+.tv-lb { width: 100%; border-collapse: collapse; }
+.tv-lb th, .tv-lb td {
+  padding: clamp(3px, 0.7vh, 8px) clamp(6px, 0.9vw, 14px);
+  text-align: right; white-space: nowrap;
+  font: 600 clamp(12px, 1.3vw, 19px)/1.15 var(--mono);
+}
+.tv-lb thead th {
+  font-size: clamp(10px, 1vw, 13px); font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--border-soft);
+}
+.tv-lb .tv-lb-rank { width: 1%; text-align: center; color: var(--muted); }
+.tv-lb .tv-lb-name { text-align: left; }
+.tv-lb-pname { font-family: var(--serif); font-weight: 400; font-size: clamp(14px, 1.5vw, 22px); }
+.tv-lb-role { display: block; margin-top: 2px; font: 500 clamp(10px, 0.95vw, 13px)/1 var(--mono); color: var(--muted); }
+.tv-lb tbody tr { border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+.tv-lb tbody tr.tv-lb-top { background: var(--accent-dim); }
+.tv-lb tbody tr.tv-lb-top .tv-lb-rank { color: var(--accent); }
+/* Compact mode (many players): the board splits into two side-by-side columns so
+   the whole roster fits the no-scroll viewport even alongside a 10-player reveal. */
+.tv-lb-cols { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(16px, 3vw, 56px); align-items: start; }
+.tv-endstats.compact .tv-lb th,
+.tv-endstats.compact .tv-lb td { padding: clamp(2px, 0.55vh, 6px) clamp(6px, 0.9vw, 14px); }
 
 /* --- Exit controls (host End Game / player Leave Game) + confirm modal ---- */
 /* Floating control, top-right, available over both the player board and the
