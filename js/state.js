@@ -13,7 +13,7 @@
 import {
   ROLES, TEAM_SIZES, MIN_PLAYERS, MAX_PLAYERS, MAX_REJECTS, QUESTS_TO_WIN,
   teamSize, failThreshold, validateRoleConfig, buildRoleDeck, shuffle,
-  computeKnowledge, defaultRoleConfig,
+  computeKnowledge, describeRole, defaultRoleConfig,
 } from './rules.js';
 
 export const PHASES = {
@@ -635,10 +635,15 @@ export class GameEngine {
 
     if (p.roleId) {
       const role = ROLES[p.roleId];
-      priv.role = { id: role.id, name: role.name, team: role.team, blurb: role.blurb };
+      const roster = this.players.map(x => ({ id: x.id, name: x.name, roleId: x.roleId }));
+      // Blurb is lineup-aware (describeRole), so the reveal card never claims a
+      // relationship to a role that isn't in this game (e.g. Morgana "appears as
+      // Merlin to Percival" with no Percival), and stays consistent with the
+      // dynamic knowledge line below it.
+      priv.role = { id: role.id, name: role.name, team: role.team, blurb: describeRole(p.roleId, roster) };
       priv.knowledge = computeKnowledge(
         { id: p.id, name: p.name, roleId: p.roleId },
-        this.players.map(x => ({ id: x.id, name: x.name, roleId: x.roleId })),
+        roster,
         { firstLeaderId: this.firstLeaderId }
       );
     }

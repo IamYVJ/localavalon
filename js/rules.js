@@ -300,3 +300,44 @@ export function computeKnowledge(player, players, opts = {}) {
   return { team, seesLabel: 'No special knowledge', sees: [],
            note: 'Trust carefully.' };
 }
+
+// ---------------------------------------------------------------------------
+// Lineup-aware role description for the reveal card.
+//
+// The static ROLES[id].blurb is written for the "full" setup and references
+// specific other roles ("appears as Merlin to Percival", "all Evil except
+// Mordred"). When the referenced role is NOT in play, that blurb is wrong and
+// can even contradict the dynamic knowledge line we show beneath it. Given the
+// actual seated roster, return a description that matches what's really in the
+// game. Roles whose flavour doesn't depend on the lineup fall through to the
+// static blurb unchanged.
+//
+// `players` is the seated roster (each { id, name, roleId }); only the SET of
+// roles present matters here, never who holds them.
+// ---------------------------------------------------------------------------
+export function describeRole(roleId, players) {
+  const role = ROLES[roleId];
+  if (!role) return '';
+  const has = (rid) => players.some(p => p.roleId === rid);
+
+  switch (roleId) {
+    case 'merlin':
+      return has('mordred')
+        ? 'Sees all Evil except Mordred. Win quietly — if found, the Assassin can end the game.'
+        : 'Sees all Evil. Win quietly — if found, the Assassin can end the game.';
+    case 'percival':
+      return has('morgana')
+        ? 'Sees Merlin and Morgana, but not which is which.'
+        : 'Sees Merlin — with no Morgana in play, the name you see is the real Merlin.';
+    case 'morgana':
+      return has('percival')
+        ? 'Appears as Merlin to Percival.'
+        : 'A Minion of Mordred. With no Percival in play, your Merlin disguise has no one to fool.';
+    case 'minion':
+      return has('oberon')
+        ? 'Knows the other Evil (except Oberon).'
+        : 'Knows the other Evil players.';
+    default:
+      return role.blurb;
+  }
+}

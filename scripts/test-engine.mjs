@@ -2,7 +2,7 @@
 // Run: node scripts/test-engine.mjs
 import {
   TEAM_SIZES, ROLE_COUNTS, teamSize, failThreshold, validateRoleConfig,
-  defaultRoleConfig, computeKnowledge, ROLES,
+  defaultRoleConfig, computeKnowledge, describeRole, ROLES,
 } from '../js/rules.js';
 import { GameEngine, PHASES } from '../js/state.js';
 
@@ -408,6 +408,55 @@ ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3
   // The assassin (evil) does NOT see the Untrustworthy Servant as a teammate.
   ok(!computeKnowledge(players[1], players).sees.map(s => s.id).includes('c'),
      'Evil does not see the Untrustworthy Servant');
+}
+
+// --- describeRole: reveal-card blurb adapts to the actual lineup -----------
+{
+  // Full setup: every referenced role is present, so blurbs read as written.
+  const full = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'percival' },
+    { id: 'c', name: 'C', roleId: 'morgana' },
+    { id: 'd', name: 'D', roleId: 'mordred' },
+    { id: 'e', name: 'E', roleId: 'oberon' },
+    { id: 'f', name: 'F', roleId: 'minion' },
+  ];
+  ok(/except Mordred/.test(describeRole('merlin', full)), 'Merlin blurb names Mordred when present');
+  ok(/Morgana/.test(describeRole('percival', full)), 'Percival blurb names Morgana when present');
+  ok(/Percival/.test(describeRole('morgana', full)), 'Morgana blurb names Percival when present');
+  ok(/except Oberon/.test(describeRole('minion', full)), 'Minion blurb names Oberon when present');
+
+  // Trimmed setup: the referenced roles are ABSENT, so blurbs must not claim them.
+  const lean = [
+    { id: 'a', name: 'A', roleId: 'merlin' },
+    { id: 'b', name: 'B', roleId: 'assassin' },
+    { id: 'c', name: 'C', roleId: 'servant' },
+    { id: 'd', name: 'D', roleId: 'servant' },
+    { id: 'e', name: 'E', roleId: 'minion' },
+  ];
+  // The blurbs may *mention* an absent role to explain it (the lineup is public),
+  // but must never make the FALSE relationship claim itself.
+  ok(!/except Mordred/.test(describeRole('merlin', lean)), 'Merlin blurb drops the "except Mordred" claim when absent');
+  ok(!/which is which/.test(describeRole('percival', lean)), 'Percival blurb drops the Morgana-decoy claim when absent');
+  ok(/real Merlin/.test(describeRole('percival', lean)), 'Percival blurb confirms the real Merlin when no decoy');
+  ok(!/Appears as Merlin/.test(describeRole('morgana', lean)), 'Morgana blurb drops the "appears as Merlin to Percival" claim when absent');
+  ok(!/except Oberon/.test(describeRole('minion', lean)), 'Minion blurb drops the "except Oberon" claim when absent');
+
+  // Lineup-independent roles fall through to the static catalogue blurb.
+  eq(describeRole('assassin', lean), ROLES.assassin.blurb, 'Assassin blurb unchanged by lineup');
+  eq(describeRole('oberon', full), ROLES.oberon.blurb, 'Oberon blurb unchanged by lineup');
+
+  // End-to-end: a Morgana with no Percival never sees the Percival claim on her card.
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, morgana: 1, servant: 2 }); // no Percival, no Mordred
+  ok(e.startGame().ok, 'startGame (Morgana, no Percival) ok');
+  const morg = e.players.find(p => p.roleId === 'morgana');
+  ok(!/Appears as Merlin/.test(e.privateStateFor(morg.id).role.blurb),
+     'Morgana reveal card drops the Percival disguise claim when none is in play');
+  const merl = e.players.find(p => p.roleId === 'merlin');
+  ok(!/except Mordred/.test(e.privateStateFor(merl.id).role.blurb),
+     'Merlin reveal card drops the "except Mordred" claim when none is in play');
 }
 
 // --- Lancelots: Good Lancelot may Fail; must be paired ---------------------
