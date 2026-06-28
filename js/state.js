@@ -569,7 +569,13 @@ export class GameEngine {
       hostId: this.hostId,
       players: this.players.map((p, i) => ({
         id: p.id, name: p.name, online: p.online,
-        isLeader: i === this.leaderIndex && this.phase !== PHASES.LOBBY && this.phase !== PHASES.GAMEOVER,
+        // The round-1 leader is chosen before role reveal, but we must not
+        // surface it (here or via leaderId below) until everyone has finished
+        // viewing their secret role and readied up — otherwise the TV/spectator
+        // screen would name the first leader while players are still in private
+        // role reveal. The Cleric's "first leader loyalty" hint is unaffected:
+        // it reads this.firstLeaderId directly (see privateStateFor), not this.
+        isLeader: i === this.leaderIndex && this.phase !== PHASES.LOBBY && this.phase !== PHASES.GAMEOVER && this.phase !== PHASES.ROLE_REVEAL,
         isHost: p.id === this.hostId,
       })),
       questResults: this.questResults,
@@ -579,7 +585,7 @@ export class GameEngine {
       failThreshold: (need !== null) ? failThreshold(this.count, this.questIndex) : null,
       rejectCount: this.rejectCount,
       maxRejects: MAX_REJECTS,
-      leaderId: this.leader ? this.leader.id : null,
+      leaderId: (this.leader && this.phase !== PHASES.ROLE_REVEAL) ? this.leader.id : null,
       proposal: this.proposal ? { leaderId: this.proposal.leaderId, members: this.proposal.members } : null,
       // Live vote progress (who has voted, not how) until the reveal.
       voteProgress: this.phase === PHASES.VOTE
