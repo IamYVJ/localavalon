@@ -453,6 +453,7 @@ function gameScreen(app, intents) {
   switch (pub.phase) {
     case 'lobby':         return lobbyScreen(app, intents);
     case 'roleReveal':    return roleRevealScreen(app, intents);
+    case 'lady':          return ladyScreen(app, intents);
     case 'assassination': return assassinationScreen(app, intents);
     case 'gameover':      return gameOverScreen(app, intents);
     default:              return boardScreen(app, intents); // proposal/vote/quest
@@ -472,6 +473,14 @@ function lobbyScreen(app, intents) {
       el('span', { class: 'dot ' + (p.online ? 'on' : 'off') }),
       el('span', { class: 'roster-name' }, p.name),
       p.isHost ? el('span', { class: 'pill pill-sm' }, 'HOST') : null,
+      // Host/owner can remove anyone but themselves, lobby-only (this screen is
+      // lobby). Native confirm() guards against a fat-fingered tap.
+      (isHost && !p.isHost) ? el('button', {
+        class: 'roster-kick',
+        title: `Remove ${p.name}`,
+        'aria-label': `Remove ${p.name}`,
+        onclick: () => { if (confirm(`Remove ${p.name} from the game?`)) intents.kickPlayer(p.id); },
+      }, '✕') : null,
     )),
   );
 
@@ -600,6 +609,7 @@ function gameOptions(app, intents) {
   const randomOn = !!app.randomLeaderOrder;
   const timerOn = !!app.questTimerEnabled;
   const pendingOn = !!app.showPendingVoters;
+  const ladyOn = !!app.ladyEnabled;
   const timerMin = Math.round((app.questTimerSeconds || 120) / 60);
 
   // Minute picker (1-5), shown only when the proposal timer is enabled.
@@ -661,6 +671,17 @@ function gameOptions(app, intents) {
         el('span', { class: 'toggle-text' },
           el('span', { class: 'toggle-name' }, 'Show pending voters'),
           el('span', { class: 'toggle-blurb' }, 'During the team vote, show everyone which players still haven\'t voted — no hint at how they voted.'),
+        ),
+      ),
+      el('label', { class: 'toggle' + (ladyOn ? ' on' : '') },
+        el('input', {
+          type: 'checkbox', ...(ladyOn ? { checked: true } : {}),
+          onchange: () => intents.toggleLady(),
+        }),
+        el('span', { class: 'toggle-box' }),
+        el('span', { class: 'toggle-text' },
+          el('span', { class: 'toggle-name' }, 'Lady of the Lake'),
+          el('span', { class: 'toggle-blurb' }, 'After quests 2, 3 and 4, the token holder privately learns one player\'s true loyalty, then passes the token to them. Best with 7+ players.'),
         ),
       ),
     ),
@@ -815,6 +836,7 @@ function rosterBoard(pub, app) {
         el('span', { class: 'dot ' + (p.online ? 'on' : 'off') }),
         el('span', { class: 'roster-name' }, p.name + (me ? ' (you)' : '')),
         p.isLeader ? el('span', { class: 'pill pill-sm pill-lead' }, 'LEADER') : null,
+        pub.ladyHolderId === p.id ? el('span', { class: 'pill pill-sm pill-lady' }, 'LADY') : null,
         proposed.has(p.id) ? el('span', { class: 'pill pill-sm' }, 'ON QUEST') : null,
       );
     }),
@@ -1022,6 +1044,72 @@ function questPanel(app, intents) {
 }
 
 // ---------------------------------------------------------------------------
+// LADY OF THE LAKE — the token holder privately inspects one player's loyalty,
+// then the token passes to that player. Only the holder ever sees the result.
+// ---------------------------------------------------------------------------
+function ladyScreen(app, intents) {
+  const pub = app.pub;
+  const priv = app.priv || {};
+  const holder = pub.players.find(p => p.id === pub.ladyHolderId);
+  const canControl = app.me.isHost || app.me.owner;
+
+  // (a) Holder has looked — show the private loyalty result, then continue.
+  if (priv.isLady && priv.ladyResult) {
+    const evil = priv.ladyResult.team === 'evil';
+    return shell(
+      wordmark(),
+      el('h1', { class: 'hero hero-sm' }, 'Lady of the Lake'),
+      el('p', { class: 'tagline' }, 'You looked into the loyalty of ',
+        el('span', { class: 'accent' }, priv.ladyResult.targetName), '.'),
+      el('div', { class: 'lady-result' },
+        el('div', { class: 'lady-result-name' }, priv.ladyResult.targetName),
+        el('div', { class: 'pill ' + (evil ? 'pill-evil' : 'pill-good') }, evil ? 'EVIL' : 'GOOD'),
+      ),
+      el('p', { class: 'fine' }, 'Only you can see this. The token now passes to them.'),
+      el('div', { class: 'btn-row' },
+        el('button', { class: 'btn btn-primary', onclick: () => intents.ladyContinue() }, '> CONTINUE'),
+      ),
+      liveRegion('Loyalty revealed'),
+    );
+  }
+
+  // (b) Holder is choosing whom to inspect.
+  if (priv.isLady) {
+    const chips = el('div', { class: 'chip-grid' },
+      ...(priv.ladyTargets || []).map(t => el('button', {
+        class: 'chip',
+        onclick: () => { if (confirm(`Inspect ${t.name}'s loyalty?`)) intents.ladyInspect(t.id); },
+      }, t.name)),
+    );
+    return shell(
+      wordmark(),
+      el('h1', { class: 'hero hero-sm' }, 'Lady of the Lake'),
+      el('p', { class: 'tagline' }, 'You hold the Lady. Choose a player to ',
+        el('span', { class: 'accent' }, 'inspect their loyalty'), ' — privately, for your eyes only.'),
+      chips,
+      rolePeek(app),
+      liveRegion('You hold the Lady of the Lake'),
+    );
+  }
+
+  // (c) Everyone else waits. A controlling host who isn't the holder can skip
+  // (e.g. the holder went AWOL) so a stalled inspection can't freeze the game.
+  return shell(
+    wordmark(),
+    el('h1', { class: 'hero hero-sm' }, 'Lady of the Lake'),
+    el('p', { class: 'tagline' },
+      el('span', { class: 'accent' }, holder ? holder.name : 'A player'),
+      pub.ladyResolved ? ' has looked into someone\'s loyalty.' : ' is inspecting someone\'s loyalty…'),
+    el('div', { class: 'spinner' }),
+    canControl ? el('div', { class: 'btn-row' },
+      el('button', { class: 'btn btn-secondary', onclick: () => intents.ladySkip() }, 'SKIP (HOST)'),
+    ) : null,
+    rolePeek(app),
+    liveRegion('Lady of the Lake in progress'),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // ASSASSINATION
 // ---------------------------------------------------------------------------
 function assassinationScreen(app, intents) {
@@ -1180,6 +1268,7 @@ function tvRoster(pub) {
       el('span', { class: 'tv-player-name' }, p.name),
       el('span', { class: 'tv-player-tags' },
         p.isLeader ? el('span', { class: 'tv-tag tv-tag-lead' }, 'LEADER') : null,
+        p.id === pub.ladyHolderId ? el('span', { class: 'tv-tag tv-tag-lady' }, 'LADY') : null,
         proposed.has(p.id) ? el('span', { class: 'tv-tag' }, 'ON QUEST') : null,
         p.online ? null : el('span', { class: 'tv-tag tv-tag-off' }, 'AWAY'),
       ),
@@ -1315,6 +1404,17 @@ function tvStatus(app) {
       return tvPanel(`QUEST ${pub.currentQuest + 1} · UNDERWAY`,
         el('p', { class: 'tv-lead' }, 'The team is deciding the quest\'s fate'),
         el('p', { class: 'tv-sub' }, `${played}/${progress.length} cards played…`),
+      );
+    }
+    case 'lady': {
+      const holder = pub.players.find(p => p.id === pub.ladyHolderId);
+      return tvPanel('LADY OF THE LAKE',
+        el('p', { class: 'tv-lead' },
+          el('span', { class: 'accent' }, holder ? holder.name : 'A player'),
+          pub.ladyResolved ? ' has looked' : ' holds the Lady'),
+        el('p', { class: 'tv-sub' }, pub.ladyResolved
+          ? 'The loyalty is known only to them. Passing the token…'
+          : 'Privately inspecting another player\'s loyalty…'),
       );
     }
     case 'assassination': {
@@ -1623,6 +1723,9 @@ function phaseAnnouncement(pub) {
     case 'quest':    return pub.questResolved
       ? `Quest ${pub.currentQuest + 1} ${pub.lastQuestResult}.`
       : 'Quest underway.';
+    case 'lady':     return pub.ladyResolved
+      ? 'Lady of the Lake: a loyalty has been revealed to the holder.'
+      : 'Lady of the Lake: a player is inspecting loyalty.';
     default:         return '';
   }
 }

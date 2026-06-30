@@ -156,6 +156,37 @@ async function main() {
   send(vic2, { type: 'join', code: code2, name: 'Vic', clientId: 'c2-3' }); // Vic's device
   ok(vic2.byType.welcome && !vic2.byType.rejected, 'mid-game reclaim via matching clientId still works');
 
+  // --- kick: owner removes a lobby player ---------------------------------
+  {
+    const o3 = new FakeWS('o3');
+    send(o3, { type: 'createRoom', name: 'Mona', clientId: 'c-m' });
+    const code3 = o3.byType.welcome.code;
+    const ownerId = o3.byType.welcome.playerId;
+    const room3 = ctx.manager.get(code3);
+
+    const victim = new FakeWS('victim');
+    send(victim, { type: 'join', code: code3, name: 'Zane', clientId: 'c-z' });
+    const victimId = victim.byType.welcome.playerId;
+    const other = new FakeWS('other');
+    send(other, { type: 'join', code: code3, name: 'Yara', clientId: 'c-y' });
+    eq(room3.engine.count, 3, 'three seated before the kick');
+
+    // A non-owner cannot kick.
+    send(other, { type: 'kick', targetId: victimId });
+    eq(room3.engine.count, 3, 'a non-owner kick is ignored');
+
+    // Owner kicks the victim: seat removed, victim notified, socket closed.
+    send(o3, { type: 'kick', targetId: victimId });
+    eq(room3.engine.count, 2, 'owner kick removes the seat');
+    ok(!room3.engine.getPlayer(victimId), 'kicked player gone from the roster');
+    ok(!!victim.byType.kicked, 'victim receives a kicked message');
+    eq(victim.readyState, 3, 'victim socket is closed');
+
+    // Owner cannot kick themselves.
+    send(o3, { type: 'kick', targetId: ownerId });
+    eq(room3.engine.count, 2, 'owner cannot kick themselves');
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed) process.exit(1);
 }

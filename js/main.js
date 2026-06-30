@@ -47,6 +47,7 @@ const app = {
   questTimerSeconds: 120,         // chosen duration in seconds (60-300)
   localProposalDeadline: null,    // Date.now()-based deadline used to render the countdown
   showPendingVoters: false,       // reveal who still owes a team vote
+  ladyEnabled: false,             // Lady of the Lake loyalty inspection between quests
   _lastProposalKey: null,
   // Local-network game discovery (Join screen).
   discovered: [],            // [{ code, hostName, playerCount, phase, joinable }]
@@ -317,6 +318,14 @@ function handleIntent(playerId, msg) {
       break;
     }
     case 'assassinate': engine.assassinate(playerId, msg.targetId); hostSync(); break;
+    case 'ladyInspect': {
+      const r = engine.useLady(playerId, msg.targetId);
+      if (!r.ok && r.error) net.sendTo(playerId, { type: 'error', message: r.error });
+      hostSync();
+      break;
+    }
+    case 'ladyContinue': engine.acknowledgeLady(playerId); hostSync(); break;
+    case 'ladySkip':     engine.skipLady(playerId); hostSync(); break;
     case 'requestStats':
       net.sendTo(playerId, { type: 'statsData', data: getLeaderboard(app.code) });
       break;
@@ -389,6 +398,7 @@ function startHosting() {
   engine.setRandomLeaderOrder(app.randomLeaderOrder);
   engine.setQuestTimer(app.questTimerEnabled, app.questTimerSeconds);
   engine.setShowPendingVoters(app.showPendingVoters);
+  engine.setLadyEnabled(app.ladyEnabled);
   rebuildConfig();
 
   saveSession({ mode: 'host', code, name, spectator: asSpectator });
@@ -422,6 +432,7 @@ function resumeHosting(code, snapshot, name, asSpectator = false) {
   app.questTimerEnabled = !!engine.questTimerEnabled;
   app.questTimerSeconds = engine.questTimerSeconds;
   app.showPendingVoters = !!engine.showPendingVoters;
+  app.ladyEnabled = !!engine.ladyEnabled;
   // If we reload on the game-over screen, the game was already recorded before
   // the reload — don't let the resume re-record (and inflate) the same result.
   if (engine.phase === 'gameover') app._gameRecorded = true;
@@ -632,6 +643,11 @@ function clientOnData(msg, asSpectator) {
       break;
     case 'rejected': clearSession(); teardownNet(); app.screen = 'join'; app.error = msg.message; startDiscovery(); draw(); break;
     case 'error':    app.error = msg.message; draw(); break;
+    // The host removed us from the lobby. Tear everything down and return home
+    // with a notice. stopClientReconnect() already ran at the top of this
+    // handler, and goHome() nulls `net`, so the imminent socket close can't
+    // re-trigger the reconnect loop and silently rejoin us.
+    case 'kicked':   intents.goHome(msg.message || 'The host removed you from the game.'); break;
     default: break;
   }
 }
@@ -795,6 +811,7 @@ function sendServerLobbyConfig() {
     questTimerEnabled: app.questTimerEnabled,
     questTimerSeconds: app.questTimerSeconds,
     showPendingVoters: app.showPendingVoters,
+    ladyEnabled: app.ladyEnabled,
   });
 }
 
@@ -810,7 +827,7 @@ const intents = {
   // (the link lives on both the home and join screens).
   gotoHowTo: () => { app._howToFrom = app.screen; app.screen = 'howto'; draw(); },
   backFromHowTo: () => { app.screen = app._howToFrom || 'home'; draw(); },
-  goHome: () => {
+  goHome: (note = '') => {
     teardownNet();
     stopDiscovery();
     clearSession();
@@ -818,7 +835,7 @@ const intents = {
     app.mode = 'p2p';
     serverCreated = false;
     app.screen = 'home';
-    app.pub = null; app.priv = null; app.error = '';
+    app.pub = null; app.priv = null; app.error = note;
     app.me.isHost = false; app.me.id = null; app.me.isSpectator = false; app.me.owner = false;
     app.spectatorMode = false;
     app.confirmEndGame = false;
@@ -847,6 +864,22 @@ const intents = {
     if (app.mode === 'server') { if (!app.me.owner) return; app.toggles[id] = !app.toggles[id]; sendServerLobbyConfig(); draw(); return; }
     app.toggles[id] = !app.toggles[id];
     rebuildConfig();
+    hostSync();
+  },
+
+  // Host/owner removes a player from the lobby (lobby-only — see engine guard).
+  // Server mode: the owner relays a 'kick' to the server, which removes the seat
+  // and closes the victim's socket. P2P: the host runs the engine locally, so it
+  // drops the seat itself, then pushes a 'kicked' notice to that peer (who tears
+  // their own connection down on receipt). The engine refuses self-kick and any
+  // non-host caller, so a forged wire 'kick' from a joiner can't take effect.
+  kickPlayer: (targetId) => {
+    if (app.mode === 'server') { if (app.me.owner) sendIntent({ type: 'kick', targetId }); return; }
+    if (!app.me.isHost || !engine) return;
+    const r = engine.kickPlayer(app.me.id, targetId);
+    if (!r.ok) return;
+    try { net && net.sendTo(targetId, { type: 'kicked' }); } catch (_) {}
+    if (engine.phase === 'lobby') rebuildConfig();
     hostSync();
   },
   toggleReveal: () => {
@@ -883,6 +916,13 @@ const intents = {
     if (!app.me.isHost || !engine) return;
     app.showPendingVoters = !app.showPendingVoters;
     engine.setShowPendingVoters(app.showPendingVoters);
+    hostSync();
+  },
+  toggleLady: () => {
+    if (app.mode === 'server') { if (!app.me.owner) return; app.ladyEnabled = !app.ladyEnabled; sendServerLobbyConfig(); draw(); return; }
+    if (!app.me.isHost || !engine) return;
+    app.ladyEnabled = !app.ladyEnabled;
+    engine.setLadyEnabled(app.ladyEnabled);
     hostSync();
   },
   startGame: () => {
@@ -972,6 +1012,10 @@ const intents = {
   // Player tapped a quest card they aren't allowed to play — nudge, don't submit.
   questBlocked: (kind) => { app.questNotice = kind; draw(); },
   assassinate: (targetId) => sendIntent({ type: 'assassinate', targetId }),
+  // Lady of the Lake: holder inspects a target, then continues; host may skip.
+  ladyInspect: (targetId) => sendIntent({ type: 'ladyInspect', targetId }),
+  ladyContinue: () => sendIntent({ type: 'ladyContinue' }),
+  ladySkip: () => sendIntent({ type: 'ladySkip' }),
 };
 
 // ---------------------------------------------------------------------------

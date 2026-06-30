@@ -22,6 +22,7 @@ export const PHASES = {
   PROPOSAL: 'proposal',
   VOTE: 'vote',
   QUEST: 'quest',
+  LADY: 'lady',                 // Lady of the Lake: a loyalty inspection between quests
   ASSASSINATION: 'assassination',
   GAMEOVER: 'gameover',
 };
@@ -41,6 +42,10 @@ export class GameEngine {
     this.questTimerSeconds = 120;   // chosen duration, clamped to 60-300 (1-5 minutes)
     this.proposalDeadline = null;   // absolute host-clock ms when the current proposal expires
     this.showPendingVoters = false; // host option: reveal who still owes a vote during the team vote
+    this.ladyEnabled = false;   // host option: Lady of the Lake loyalty inspection between quests
+    this.ladyHolderId = null;   // id of the player currently holding the Lady token
+    this.ladyHistory = [];      // ids who have ever held the token (can't be inspected again)
+    this.ladyResult = null;     // { holderId, targetId, team } — SECRET, only the holder may see it
     this.leaderIndex = 0;
     this.leaderOrder = null;    // null = sequential; array of seat indices = shuffled order
     this.leaderOrderPos = 0;    // current position within leaderOrder
@@ -132,6 +137,14 @@ export class GameEngine {
     if (this.assassinTargetId === oldId) this.assassinTargetId = newId;
     if (oldId in this.votes) { this.votes[newId] = this.votes[oldId]; delete this.votes[oldId]; }
     if (oldId in this.questCards) { this.questCards[newId] = this.questCards[oldId]; delete this.questCards[oldId]; }
+    if (this.ladyHolderId === oldId) this.ladyHolderId = newId;
+    if (Array.isArray(this.ladyHistory)) {
+      this.ladyHistory = this.ladyHistory.map(h => (h === oldId ? newId : h));
+    }
+    if (this.ladyResult) {
+      if (this.ladyResult.holderId === oldId) this.ladyResult.holderId = newId;
+      if (this.ladyResult.targetId === oldId) this.ladyResult.targetId = newId;
+    }
     if (this.proposal) {
       if (this.proposal.leaderId === oldId) this.proposal.leaderId = newId;
       if (Array.isArray(this.proposal.members)) {
@@ -184,6 +197,22 @@ export class GameEngine {
     if (s) s.online = false;
   }
 
+  /**
+   * Host-initiated removal of a player. LOBBY-ONLY by design: kicking mid-game
+   * would change the player count — and therefore the role deal, vote maths, and
+   * quest team sizes — so it is refused once play has started. The host cannot
+   * remove themselves. Transports notify the kicked client separately.
+   */
+  kickPlayer(byId, targetId) {
+    if (this.phase !== PHASES.LOBBY) return { ok: false, error: 'Players can only be removed in the lobby.' };
+    if (byId !== this.hostId) return { ok: false, error: 'Only the host may remove players.' };
+    if (targetId === this.hostId) return { ok: false, error: 'The host cannot be removed.' };
+    const before = this.players.length;
+    this.players = this.players.filter(p => p.id !== targetId);
+    if (this.players.length === before) return { ok: false, error: 'No such player.' };
+    return { ok: true };
+  }
+
   getPlayer(id) { return this.players.find(p => p.id === id); }
   get count() { return this.players.length; }
   get leader() { return this.players[this.leaderIndex] || null; }
@@ -215,6 +244,13 @@ export class GameEngine {
 
   /** Host toggle: surface the names of players who still owe a team vote. */
   setShowPendingVoters(v) { this.showPendingVoters = !!v; }
+
+  /**
+   * Host toggle: Lady of the Lake. When enabled, after quests 2, 3, and 4 the
+   * current token holder privately inspects one player's loyalty (good/evil),
+   * then passes the token to that player. Best with 7+ players.
+   */
+  setLadyEnabled(v) { this.ladyEnabled = !!v; }
 
   /** Convenience used by the UI when player count changes in the lobby. */
   ensureConfig() {
@@ -250,6 +286,19 @@ export class GameEngine {
     // Snapshot who leads the first quest — the Cleric's reveal depends on it,
     // so it must stay fixed even after leadership rotates.
     this.firstLeaderId = this.players[this.leaderIndex] ? this.players[this.leaderIndex].id : null;
+
+    // Lady of the Lake traditionally starts to the RIGHT of the first leader
+    // (the player just before them in seat order), so the token travels back
+    // toward the early leaders. Seed the history with that holder.
+    if (this.ladyEnabled) {
+      const n = this.players.length;
+      const startIdx = (this.leaderIndex - 1 + n) % n;
+      this.ladyHolderId = this.players[startIdx] ? this.players[startIdx].id : null;
+      this.ladyHistory = this.ladyHolderId ? [this.ladyHolderId] : [];
+    } else {
+      this.ladyHolderId = null;
+      this.ladyHistory = [];
+    }
 
     this.phase = PHASES.ROLE_REVEAL;
     return { ok: true };
@@ -448,10 +497,94 @@ export class GameEngine {
       return this._endGame('good', `${QUESTS_TO_WIN} quests succeeded.`);
     }
 
-    // Continue to the next quest.
+    // Continue — but first run Lady of the Lake if it's due (after quests 2-4).
+    if (this._shouldRunLady()) {
+      this.phase = PHASES.LADY;
+      this.ladyResult = null;
+      this._ladyResolved = false;
+      return;
+    }
+    this._beginNextQuest();
+  }
+
+  /** Advance the quest counter, rotate leadership, and open a fresh proposal. */
+  _beginNextQuest() {
     this.questIndex += 1;
     this._advanceLeader();
     this._beginProposal();
+  }
+
+  // -------------------------------------------------------------------------
+  // Lady of the Lake — a between-quests loyalty inspection
+  // -------------------------------------------------------------------------
+
+  /**
+   * True when the Lady should trigger now. The inspection happens AFTER quests
+   * 2, 3, and 4 resolve — i.e. when questIndex is 1, 2, or 3 (0-based) and we're
+   * about to move on. Requires the option on, a live holder, and at least one
+   * eligible (never-held) player other than the holder to inspect.
+   */
+  _shouldRunLady() {
+    if (!this.ladyEnabled || !this.ladyHolderId) return false;
+    if (this.questIndex < 1 || this.questIndex > 3) return false;
+    return this.players.some(p => p.id !== this.ladyHolderId && !this.ladyHistory.includes(p.id));
+  }
+
+  /**
+   * The token holder inspects a target's true loyalty. The result is recorded
+   * privately (only the holder ever sees the team) and the phase holds on a
+   * reveal beat until acknowledgeLady() passes the token on.
+   */
+  useLady(holderId, targetId) {
+    if (this.phase !== PHASES.LADY) return { ok: false, error: 'Not the Lady phase.' };
+    if (this._ladyResolved) return { ok: false, error: 'You have already looked.' };
+    if (holderId !== this.ladyHolderId) return { ok: false, error: 'Only the Lady holder may inspect.' };
+    if (targetId === holderId) return { ok: false, error: 'You cannot inspect yourself.' };
+    if (this.ladyHistory.includes(targetId)) {
+      return { ok: false, error: 'That player has already held the Lady.' };
+    }
+    const target = this.getPlayer(targetId);
+    if (!target) return { ok: false, error: 'Unknown target.' };
+
+    this.ladyResult = { holderId, targetId, team: ROLES[target.roleId].team };
+    this._ladyResolved = true;
+    return { ok: true };
+  }
+
+  /**
+   * After the holder has seen the loyalty result, pass the token to the
+   * inspected player and continue to the next quest.
+   */
+  acknowledgeLady(holderId) {
+    if (this.phase !== PHASES.LADY || !this._ladyResolved) return { ok: false };
+    if (holderId !== this.ladyHolderId) return { ok: false };
+    this._passLadyToken();
+    this._beginNextQuest();
+    return { ok: true };
+  }
+
+  /**
+   * Host escape hatch: skip the inspection (e.g. the holder went AWOL). If the
+   * holder had already looked, still pass the token to that target; otherwise
+   * the token stays put and the game simply moves on.
+   */
+  skipLady(byId) {
+    if (this.phase !== PHASES.LADY) return { ok: false };
+    if (byId !== this.hostId) return { ok: false, error: 'Only the host may skip.' };
+    if (this._ladyResolved && this.ladyResult) this._passLadyToken();
+    else { this.ladyResult = null; this._ladyResolved = false; }
+    this._beginNextQuest();
+    return { ok: true };
+  }
+
+  /** Move the token to the inspected player and clear the pending result. */
+  _passLadyToken() {
+    if (this.ladyResult && this.ladyResult.targetId) {
+      this.ladyHolderId = this.ladyResult.targetId;
+      if (!this.ladyHistory.includes(this.ladyHolderId)) this.ladyHistory.push(this.ladyHolderId);
+    }
+    this.ladyResult = null;
+    this._ladyResolved = false;
   }
 
   assassinate(actorId, targetId) {
@@ -497,6 +630,7 @@ export class GameEngine {
     const questTimerEnabled = this.questTimerEnabled;
     const questTimerSeconds = this.questTimerSeconds;
     const showPendingVoters = this.showPendingVoters;
+    const ladyEnabled = this.ladyEnabled;
     this.reset();
     this.players = players;
     this.config = config;
@@ -506,6 +640,7 @@ export class GameEngine {
     this.questTimerEnabled = questTimerEnabled;
     this.questTimerSeconds = questTimerSeconds;
     this.showPendingVoters = showPendingVoters;
+    this.ladyEnabled = ladyEnabled;
   }
 
   // -------------------------------------------------------------------------
@@ -525,6 +660,11 @@ export class GameEngine {
       questTimerSeconds: this.questTimerSeconds,
       proposalDeadline: this.proposalDeadline,
       showPendingVoters: this.showPendingVoters,
+      ladyEnabled: this.ladyEnabled,
+      ladyHolderId: this.ladyHolderId,
+      ladyHistory: this.ladyHistory,
+      ladyResult: this.ladyResult,
+      _ladyResolved: !!this._ladyResolved,
       leaderIndex: this.leaderIndex,
       leaderOrder: this.leaderOrder,
       leaderOrderPos: this.leaderOrderPos,
@@ -561,6 +701,11 @@ export class GameEngine {
       questTimerSeconds: s.questTimerSeconds ?? 120,
       proposalDeadline: s.proposalDeadline ?? null,
       showPendingVoters: !!s.showPendingVoters,
+      ladyEnabled: !!s.ladyEnabled,
+      ladyHolderId: s.ladyHolderId ?? null,
+      ladyHistory: Array.isArray(s.ladyHistory) ? s.ladyHistory : [],
+      ladyResult: s.ladyResult ?? null,
+      _ladyResolved: !!s._ladyResolved,
       leaderIndex: s.leaderIndex ?? 0,
       leaderOrder: s.leaderOrder ?? null,
       leaderOrderPos: s.leaderOrderPos ?? 0,
@@ -647,6 +792,12 @@ export class GameEngine {
         ? Math.max(0, this.proposalDeadline - Date.now())
         : null,
       showPendingVoters: this.showPendingVoters,
+      // Lady of the Lake: who holds the token and whether they've looked yet.
+      // The loyalty RESULT (team) is never public — it lives only in the
+      // holder's private slice (see privateStateFor).
+      ladyEnabled: this.ladyEnabled,
+      ladyHolderId: this.ladyEnabled ? this.ladyHolderId : null,
+      ladyResolved: this.phase === PHASES.LADY ? !!this._ladyResolved : false,
       readyCount: this.players.filter(p => p.ready).length,
       playerCount: this.players.length,
       // Watch-only spectators (online only) for the lobby screen. No role or
@@ -711,6 +862,23 @@ export class GameEngine {
       priv.assassinTargets = this.players
         .filter(x => x.id !== id && !knownEvil.has(x.id))
         .map(x => ({ id: x.id, name: x.name }));
+    }
+    // Lady of the Lake: only the current holder gets the inspection affordance,
+    // and only the holder ever learns the loyalty they uncovered.
+    if (this.phase === PHASES.LADY && id === this.ladyHolderId) {
+      priv.isLady = true;
+      if (this._ladyResolved && this.ladyResult) {
+        const t = this.getPlayer(this.ladyResult.targetId);
+        priv.ladyResult = {
+          targetId: this.ladyResult.targetId,
+          targetName: t ? t.name : '—',
+          team: this.ladyResult.team,
+        };
+      } else {
+        priv.ladyTargets = this.players
+          .filter(x => x.id !== id && !this.ladyHistory.includes(x.id))
+          .map(x => ({ id: x.id, name: x.name }));
+      }
     }
     return priv;
   }

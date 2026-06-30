@@ -747,5 +747,196 @@ ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3
   eq(e2.publicState().spectators, [], 'no spectators shown until they reconnect after restore');
 }
 
+// --- Lady of the Lake -------------------------------------------------------
+// End-to-end: after the SECOND quest resolves, the token holder privately
+// inspects a player's loyalty. The result stays secret in public state and is
+// shown ONLY to the holder; acknowledging passes the token and resumes play.
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.setLadyEnabled(true);
+  ok(e.startGame().ok, 'startGame with Lady ok');
+  // Initial holder sits to the right of the first leader (seat 0) → seat 4.
+  eq(e.ladyHolderId, 'p4', 'initial Lady holder is to the leader\'s right (p4)');
+  eq(e.ladyHistory, ['p4'], 'history seeded with the initial holder');
+  e.players.forEach(p => e.setReady(p.id));
+
+  // Quest 1 (index 0): Lady must NOT fire (only fires after quests 2-4).
+  e.proposeTeam(e.leader.id, e.players.slice(0, teamSize(5, 0)).map(p => p.id));
+  approveAll(e);
+  runQuestAllSuccess(e);
+  eq(e.phase, PHASES.PROPOSAL, 'no Lady after quest 1 (index 0)');
+  eq(e.questIndex, 1, 'advanced to quest 2');
+
+  // Quest 2 (index 1): Lady fires after it resolves.
+  e.proposeTeam(e.leader.id, e.players.slice(0, teamSize(5, 1)).map(p => p.id));
+  approveAll(e);
+  runQuestAllSuccess(e);
+  eq(e.phase, PHASES.LADY, 'Lady fires after quest 2 resolves');
+  eq(e.questIndex, 1, 'quest counter held until the Lady resolves');
+
+  // Public state: holder + unresolved flag, but NEVER the loyalty result.
+  let pub = e.publicState();
+  eq(pub.ladyEnabled, true, 'publicState exposes ladyEnabled');
+  eq(pub.ladyHolderId, 'p4', 'publicState exposes the holder');
+  eq(pub.ladyResolved, false, 'publicState shows not-yet-looked');
+  ok(!('ladyResult' in pub), 'publicState never carries the loyalty result');
+
+  // Holder private slice: the choosable targets (exclude self + prior holders).
+  const holderPriv = e.privateStateFor('p4');
+  ok(holderPriv.isLady, 'holder private slice flags isLady');
+  eq(holderPriv.ladyTargets.map(t => t.id).sort(), ['p0', 'p1', 'p2', 'p3'], 'targets exclude self/history');
+  ok(!holderPriv.ladyResult, 'no result before the holder looks');
+  ok(!e.privateStateFor('p0').isLady, 'a non-holder has no Lady affordance');
+
+  // Guard: only the holder may inspect; not self.
+  ok(!e.useLady('p0', 'p1').ok, 'non-holder cannot inspect');
+  ok(!e.useLady('p4', 'p4').ok, 'holder cannot inspect themselves');
+
+  // Inspect p0: result recorded privately with the TRUE team.
+  const trueTeam = ROLES[e.getPlayer('p0').roleId].team;
+  ok(e.useLady('p4', 'p0').ok, 'holder inspects a valid target');
+  ok(!e.useLady('p4', 'p1').ok, 'holder cannot inspect twice');
+
+  pub = e.publicState();
+  eq(pub.ladyResolved, true, 'publicState now shows the holder has looked');
+  ok(!('ladyResult' in pub), 'publicState STILL hides the loyalty result');
+
+  const afterLook = e.privateStateFor('p4');
+  eq(afterLook.ladyResult.team, trueTeam, 'holder learns the target\'s true loyalty');
+  eq(afterLook.ladyResult.targetId, 'p0', 'holder result names the inspected player');
+  ok(!afterLook.ladyTargets, 'targets replaced by the result once looked');
+  // Crucially, the INSPECTED player never sees the result.
+  ok(!e.privateStateFor('p0').ladyResult, 'the inspected player cannot see their own result');
+
+  // Acknowledge: token passes to the inspected player; play resumes.
+  ok(e.acknowledgeLady('p4').ok, 'holder acknowledges the result');
+  eq(e.phase, PHASES.PROPOSAL, 'play resumes at the next proposal');
+  eq(e.questIndex, 2, 'advanced to quest 3 after the Lady');
+  eq(e.ladyHolderId, 'p0', 'token passed to the inspected player');
+  eq(e.ladyHistory.sort(), ['p0', 'p4'], 'history now includes both holders');
+}
+
+// Direct-state guards: prior-holder exclusion + holder-only inspection.
+{
+  const e = new GameEngine();
+  seat(e, ['A', 'B', 'C', 'D', 'E']);
+  e.players[0].roleId = 'merlin';
+  e.players[1].roleId = 'assassin';
+  e.players[2].roleId = 'servant';
+  e.players[3].roleId = 'morgana';
+  e.players[4].roleId = 'percival';
+  e.ladyEnabled = true;
+  e.phase = PHASES.LADY;
+  e.questIndex = 2;
+  e.ladyHolderId = 'p4';
+  e.ladyHistory = ['p4', 'p2'];   // p2 already held the token earlier
+
+  // Targets exclude self (p4) AND every prior holder (p2).
+  eq(e.privateStateFor('p4').ladyTargets.map(t => t.id).sort(), ['p0', 'p1', 'p3'],
+     'targets exclude self and every prior holder');
+  ok(!e.useLady('p4', 'p2').ok, 'cannot inspect a prior holder');
+  ok(!e.useLady('p4', 'p4').ok, 'cannot inspect self');
+  ok(!e.useLady('p1', 'p0').ok, 'a non-holder cannot inspect');
+
+  // Valid inspection records the true team (p1 = assassin = evil).
+  ok(e.useLady('p4', 'p1').ok, 'holder inspects a valid, never-held target');
+  eq(e.privateStateFor('p4').ladyResult.team, 'evil', 'inspected the Assassin → EVIL');
+}
+
+// Host-only skip — before and after the holder looks.
+{
+  const roles = ['merlin', 'assassin', 'servant', 'morgana', 'percival'];
+  // (a) Skip BEFORE a look: token stays put, game resumes at the next quest.
+  const e = new GameEngine();
+  seat(e, ['A', 'B', 'C', 'D', 'E']);  // p0 is host (seat 0)
+  e.players.forEach((p, i) => { p.roleId = roles[i]; });
+  e.ladyEnabled = true; e.phase = PHASES.LADY; e.questIndex = 1;
+  e.ladyHolderId = 'p3'; e.ladyHistory = ['p3'];
+  ok(!e.skipLady('p1').ok, 'a non-host cannot skip the Lady');
+  ok(e.skipLady('p0').ok, 'the host can skip the Lady');
+  eq(e.phase, PHASES.PROPOSAL, 'skip resumes play');
+  eq(e.questIndex, 2, 'skip advances to the next quest');
+  eq(e.ladyHolderId, 'p3', 'token unchanged when skipped before a look');
+
+  // (b) Skip AFTER a look still passes the token to the inspected player.
+  const e2 = new GameEngine();
+  seat(e2, ['A', 'B', 'C', 'D', 'E']);
+  e2.players.forEach((p, i) => { p.roleId = roles[i]; });
+  e2.ladyEnabled = true; e2.phase = PHASES.LADY; e2.questIndex = 1;
+  e2.ladyHolderId = 'p3'; e2.ladyHistory = ['p3'];
+  e2.useLady('p3', 'p0');
+  ok(e2._ladyResolved, 'holder looked');
+  ok(e2.skipLady('p0').ok, 'host skips after the holder looked');
+  eq(e2.ladyHolderId, 'p0', 'token still passes to the inspected player on a post-look skip');
+}
+
+// Disabled: Lady never fires; publicState hides the holder.
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  ok(!e.ladyEnabled, 'Lady off by default');
+  ok(e.startGame().ok, 'startGame (Lady off) ok');
+  eq(e.ladyHolderId, null, 'no holder assigned when Lady is off');
+  eq(e.publicState().ladyHolderId, null, 'publicState hides the holder when Lady is off');
+  e.players.forEach(p => e.setReady(p.id));
+  for (let q = 0; q < 2; q++) {
+    e.proposeTeam(e.leader.id, e.players.slice(0, teamSize(5, e.questIndex)).map(p => p.id));
+    approveAll(e);
+    runQuestAllSuccess(e);
+  }
+  eq(e.phase, PHASES.PROPOSAL, 'no Lady phase when the option is off');
+}
+
+// Persistence: ladyEnabled + holder + history round-trip; playAgain keeps it on.
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  e.setLadyEnabled(true);
+  e.startGame();
+  e.ladyHistory = ['p4', 'p0'];
+  e.ladyHolderId = 'p0';
+
+  const e2 = new GameEngine();
+  e2.restore(e.serialize());
+  ok(e2.ladyEnabled, 'ladyEnabled round-trips');
+  eq(e2.ladyHolderId, 'p0', 'ladyHolderId round-trips');
+  eq(e2.ladyHistory, ['p4', 'p0'], 'ladyHistory round-trips');
+
+  e.playAgain();
+  ok(e.ladyEnabled, 'playAgain preserves the Lady option');
+  eq(e.ladyHolderId, null, 'playAgain resets the holder (reassigned next startGame)');
+}
+
+// --- Kick player (lobby-only host control) ---------------------------------
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E', 'F']);   // p0 host, six seated
+  eq(e.count, 6, 'six players seated');
+
+  // Guards: only the host kicks, never themselves, never an unknown id.
+  ok(!e.kickPlayer('p1', 'p2').ok, 'a non-host cannot kick');
+  ok(!e.kickPlayer('p0', 'p0').ok, 'the host cannot kick themselves');
+  ok(!e.kickPlayer('p0', 'ghost').ok, 'cannot kick an unknown player');
+  eq(e.count, 6, 'no one removed by rejected kicks');
+
+  // Host removes a player in the lobby; other seats are untouched.
+  ok(e.kickPlayer('p0', 'p5').ok, 'host kicks p5 in the lobby');
+  eq(e.count, 5, 'roster shrinks after a kick');
+  ok(!e.getPlayer('p5'), 'the kicked player is gone');
+  ok(e.getPlayer('p0') && e.getPlayer('p4'), 'remaining seats intact');
+
+  // The reduced 5-player lobby can still start a valid game.
+  e.setConfig({ merlin: 1, assassin: 1, percival: 1, morgana: 1, servant: 1 });
+  ok(e.startGame().ok, 'a valid game starts after a kick');
+
+  // Kicking is refused once play is underway (would break counts/role deal).
+  ok(!e.kickPlayer('p0', 'p1').ok, 'cannot kick after the game has started');
+  eq(e.count, 5, 'a mid-game kick leaves the roster untouched');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

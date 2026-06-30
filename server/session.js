@@ -20,13 +20,15 @@
 //   join       { code, name, clientId }              seat / reclaim a seat
 //   spectate   { code, name?, clientId? }            watch only
 //   lobbyQuery { code }                              fetch lobby info
-//   lobbyConfig{ toggles, allowReveal, randomLeaderOrder,
-//                questTimerEnabled, questTimerSeconds, showPendingVoters }  (owner, lobby)
+//   lobbyConfig{ toggles, allowReveal, randomLeaderOrder, questTimerEnabled,
+//                questTimerSeconds, showPendingVoters, ladyEnabled }  (owner, lobby)
 //   startGame  {}                                    (owner)
 //   playAgain  {}                                    (owner)
 //   endGame    {}                                    (owner)
+//   kick       { targetId }                          (owner, lobby — remove a player)
 //   ready / propose{members} / vote{approve} / card{success} /
-//   assassinate{targetId} / requestStats             player intents
+//   assassinate{targetId} / ladyInspect{targetId} / ladyContinue{} /
+//   ladySkip{} / requestStats                        player intents
 //
 // server -> client:
 //   welcome   { playerId, code, owner?, spectator? }
@@ -35,6 +37,7 @@
 //   statsData { data }
 //   rejected  { message }   (fatal for this attempt — bad code/name/full)
 //   error     { message }   (non-fatal — illegal move)
+//   kicked    { message? }  (fatal — owner removed this player; client goes home)
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';
@@ -103,6 +106,22 @@ export function handleMessage(ctx, ws, raw) {
     case 'endGame':
       if (isOwner) { clearRoomTimers(room); e.endGame(); rebuildConfig(room); sync(room); }
       break;
+    case 'kick': {
+      // Owner removes a player from the lobby. The engine enforces lobby-only +
+      // host-only + no-self-kick; on success, notify the victim and close their
+      // socket. handleClose then frees the (already-removed) seat as a no-op.
+      if (!isOwner) break;
+      const r = e.kickPlayer(ws._id, msg.targetId);
+      if (!r.ok) { if (r.error) send(ws, { type: 'error', message: r.error }); break; }
+      const victim = room.conns.get(msg.targetId);
+      if (victim) {
+        try { send(victim, { type: 'kicked' }); } catch (_) { /* ignore */ }
+        try { victim.close(); } catch (_) { /* ignore */ }
+      }
+      if (e.phase === 'lobby') rebuildConfig(room);
+      sync(room);
+      break;
+    }
 
     // ---- player intents (identical semantics to main.js handleIntent) ----
     case 'ready':
@@ -121,6 +140,18 @@ export function handleMessage(ctx, ws, raw) {
     }
     case 'assassinate':
       e.assassinate(ws._id, msg.targetId); sync(room); break;
+    // Lady of the Lake. The engine enforces holder-only inspect/continue and
+    // host-only skip (e.hostId === room.ownerId in server mode), so no extra
+    // owner gating is needed here.
+    case 'ladyInspect': {
+      const r = e.useLady(ws._id, msg.targetId);
+      if (!r.ok && r.error) send(ws, { type: 'error', message: r.error });
+      sync(room); break;
+    }
+    case 'ladyContinue':
+      e.acknowledgeLady(ws._id); sync(room); break;
+    case 'ladySkip':
+      e.skipLady(ws._id); sync(room); break;
     case 'requestStats':
       send(ws, { type: 'statsData', data: getLeaderboard(room.code) }); break;
 
@@ -141,6 +172,7 @@ function applyLobbyConfig(room, msg) {
   if ('allowReveal' in msg) e.setAllowReveal(!!msg.allowReveal);
   if ('randomLeaderOrder' in msg) e.setRandomLeaderOrder(!!msg.randomLeaderOrder);
   if ('showPendingVoters' in msg) e.setShowPendingVoters(!!msg.showPendingVoters);
+  if ('ladyEnabled' in msg) e.setLadyEnabled(!!msg.ladyEnabled);
   if ('questTimerEnabled' in msg || 'questTimerSeconds' in msg) {
     const enabled = ('questTimerEnabled' in msg) ? !!msg.questTimerEnabled : e.questTimerEnabled;
     const seconds = (typeof msg.questTimerSeconds === 'number') ? msg.questTimerSeconds : e.questTimerSeconds;
