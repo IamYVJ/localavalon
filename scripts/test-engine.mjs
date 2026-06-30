@@ -707,5 +707,45 @@ ok(validateRoleConfig({ merlin: 1, assassin: 1, lunatic: 1, brute: 1, servant: 3
   ok(Array.isArray(e.publicState().reveal), 'full reveal present at game over');
 }
 
+// --- Spectator roster (lobby "who's watching") -----------------------------
+// addSpectator records a watch-only viewer with no seat/role/vote. publicState
+// surfaces ONLY online spectators (id+name) so the lobby can list them; they
+// never count as players and still get no private slice.
+{
+  const e = new GameEngine();
+  seat(e, ['Host', 'B', 'C', 'D', 'E']);
+
+  const r = e.addSpectator('s1', 'Watcher', { clientId: 'dev-s1' });
+  ok(r.ok && !r.reconnected, 'addSpectator registers a new spectator');
+  eq(e.count, 5, 'spectators never change the player count');
+  eq(e.privateStateFor('s1'), null, 'a spectator still gets no private slice');
+
+  const specs = e.publicState().spectators;
+  eq(specs, [{ id: 's1', name: 'Watcher' }], 'publicState lists the online spectator (id+name only)');
+  ok(specs.every(s => !('roleId' in s) && !('team' in s) && !('clientId' in s)),
+    'spectator projection carries no role/team/clientId');
+
+  // Reconnect from the same device (new conn id) dedupes by clientId: the entry
+  // flips back online and adopts the new id rather than stacking a duplicate.
+  e.markOffline('s1');
+  eq(e.publicState().spectators, [], 'an offline spectator drops out of the public list');
+  const r2 = e.addSpectator('s1-new', 'Watcher', { clientId: 'dev-s1' });
+  ok(r2.ok && r2.reconnected, 'same clientId reclaims the spectator record');
+  eq(e.spectators.length, 1, 'reconnect does not create a duplicate spectator');
+  eq(e.publicState().spectators, [{ id: 's1-new', name: 'Watcher' }],
+    'reconnected spectator is back online under the new id');
+
+  // A second, distinct device shows up as its own entry.
+  e.addSpectator('s2', 'Friend', { clientId: 'dev-s2' });
+  eq(e.publicState().spectators.length, 2, 'a distinct device adds a separate spectator');
+
+  // Round-trips through serialize/restore; all offline until they reconnect.
+  const e2 = new GameEngine();
+  e2.restore(e.serialize());
+  eq(e2.spectators.length, 2, 'spectators survive serialize/restore');
+  ok(e2.spectators.every(s => !s.online), 'restored spectators are offline until they reconnect');
+  eq(e2.publicState().spectators, [], 'no spectators shown until they reconnect after restore');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

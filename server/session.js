@@ -263,12 +263,19 @@ function onSpectate(ctx, ws, msg) {
   room.conns.set(id, ws);
 
   const owner = !!(ws._clientId && ws._clientId === room.ownerClientId);
-  if (owner) { room.ownerId = id; room.engine.hostId = id; }
+  if (owner) {
+    room.ownerId = id; room.engine.hostId = id;
+  } else {
+    // Record the watch-only spectator so the lobby can list who's watching. The
+    // spectating OWNER (TV/host screen) is deliberately excluded — they run the
+    // room rather than "watch" it, mirroring onCreateRoom's asSpectator branch.
+    room.engine.addSpectator(id, cleanName(msg.name), { clientId: ws._clientId });
+  }
 
   send(ws, { type: 'welcome', playerId: id, code, spectator: true, owner });
-  send(ws, { type: 'state', pub: room.engine.publicState(), priv: null });
-  // Refresh everyone else only if ownership/host changed (isHost flags).
-  if (owner) sync(room);
+  // Broadcast so existing players/spectators see the new spectator appear (and
+  // this socket receives its first state via the same path: priv is null).
+  sync(room);
 }
 
 function onLobbyQuery(ctx, ws, msg) {
@@ -300,9 +307,10 @@ export function handleClose(ctx, ws) {
   if (room.conns.get(ws._id) !== ws) return;
   room.conns.delete(ws._id);
 
-  if (!ws._spectator) {
-    room.engine.markOffline(ws._id);
-    if (room.engine.phase === 'lobby') rebuildConfig(room);
-  }
+  // markOffline handles both seats and spectators: a player's seat is freed (and
+  // dropped in the lobby), a spectator is just flagged offline so the lobby's
+  // spectator list drops them. rebuildConfig only matters when a SEAT changes.
+  room.engine.markOffline(ws._id);
+  if (!ws._spectator && room.engine.phase === 'lobby') rebuildConfig(room);
   sync(room);
 }

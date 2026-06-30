@@ -294,11 +294,12 @@ function handleIntent(playerId, msg) {
       // A spectator watches only the PUBLIC state — never a seat, a role, or any
       // private slice. We deliberately do NOT call engine.addPlayer, so they
       // don't count toward the player total and never receive secret info.
-      // privateStateFor(connId) returns null for this unseated id, and regular
-      // hostSync()s already broadcast to every connection, so just send the
-      // current public snapshot to bring them onto the spectator screen now.
+      // privateStateFor(connId) returns null for this unseated id. We DO record
+      // them as a watch-only spectator so the lobby can list who's watching;
+      // hostSync() then broadcasts the refreshed public state to everyone.
+      engine.addSpectator(playerId, msg.name, { clientId: msg.clientId });
       net.sendTo(playerId, { type: 'welcome', playerId, spectator: true });
-      net.sendTo(playerId, { type: 'state', pub: engine.publicState(), priv: null });
+      hostSync();
       break;
     }
     case 'ready':   engine.setReady(playerId); hostSync(); break;
@@ -520,7 +521,7 @@ function joinViaP2P(code, name, effectiveName, asSpectator) {
   saveSession({ mode: asSpectator ? 'spectate' : 'join', code, name: effectiveName });
   net = joinHost(code, {
     onOpen: () => net.send(asSpectator
-      ? { type: 'spectate', name: effectiveName }
+      ? { type: 'spectate', name: effectiveName, clientId: loadClientId() }
       : { type: 'join', name, clientId: loadClientId() }),
     onNetStatus: (status) => { app.netStatus = status; draw(); },
     onData: (msg) => clientOnData(msg, asSpectator),

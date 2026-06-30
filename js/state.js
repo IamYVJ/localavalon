@@ -32,6 +32,7 @@ export class GameEngine {
   reset() {
     this.phase = PHASES.LOBBY;
     this.players = [];          // seat-ordered: { id, name, online, roleId, ready }
+    this.spectators = [];       // watch-only, no seat/role/vote: { id, name, online, clientId }
     this.hostId = null;
     this.config = null;         // role config map { roleId: count }
     this.allowReveal = false;   // host option: let players re-check their role mid-game
@@ -142,14 +143,45 @@ export class GameEngine {
     }
   }
 
+  /**
+   * Register a watch-only spectator (no seat, role, vote, or ready state).
+   * Unlike players, spectators may arrive in any phase and have no name-
+   * uniqueness rule. Dedupe on reconnect by stable clientId first, then by
+   * connection id, so a spectator who drops and returns flips back to online
+   * instead of stacking duplicate entries.
+   */
+  addSpectator(id, name, { clientId = null } = {}) {
+    const trimmed = (name || '').trim() || 'Spectator';
+    let existing = clientId
+      ? this.spectators.find(s => s.clientId && s.clientId === clientId)
+      : null;
+    if (!existing) existing = this.spectators.find(s => s.id === id);
+    if (existing) {
+      existing.online = true;
+      existing.id = id;
+      if (clientId) existing.clientId = clientId;
+      existing.name = trimmed;
+      return { ok: true, spectator: existing, reconnected: true };
+    }
+    const spectator = { id, name: trimmed, online: true, clientId: clientId || null };
+    this.spectators.push(spectator);
+    return { ok: true, spectator };
+  }
+
   markOffline(id) {
     const p = this.players.find(x => x.id === id);
-    if (!p) return;
-    p.online = false;
-    // In the lobby, drop the seat entirely so the roster stays clean.
-    if (this.phase === PHASES.LOBBY) {
-      this.players = this.players.filter(x => x.id !== id);
+    if (p) {
+      p.online = false;
+      // In the lobby, drop the seat entirely so the roster stays clean.
+      if (this.phase === PHASES.LOBBY) {
+        this.players = this.players.filter(x => x.id !== id);
+      }
+      return;
     }
+    // Spectators aren't seated: just flag offline (publicState hides offline
+    // spectators) and keep the record so a reconnect dedupes by clientId.
+    const s = this.spectators.find(x => x.id === id);
+    if (s) s.online = false;
   }
 
   getPlayer(id) { return this.players.find(p => p.id === id); }
@@ -484,6 +516,7 @@ export class GameEngine {
     return JSON.parse(JSON.stringify({
       phase: this.phase,
       players: this.players,
+      spectators: this.spectators,
       hostId: this.hostId,
       config: this.config,
       allowReveal: this.allowReveal,
@@ -519,6 +552,7 @@ export class GameEngine {
     Object.assign(this, {
       phase: s.phase ?? PHASES.LOBBY,
       players: Array.isArray(s.players) ? s.players : [],
+      spectators: Array.isArray(s.spectators) ? s.spectators : [],
       hostId: s.hostId ?? null,
       config: s.config ?? null,
       allowReveal: !!s.allowReveal,
@@ -548,6 +582,9 @@ export class GameEngine {
     });
     // Everyone is offline until their connection re-establishes after reload.
     this.players.forEach(p => { p.online = (p.id === this.hostId); });
+    // Spectators have no host seat, so they're all offline until they reconnect
+    // (publicState hides offline spectators; a reconnect dedupes by clientId).
+    this.spectators.forEach(s => { s.online = false; });
     // A host reload landing mid-proposal would otherwise restore a deadline that
     // may already be in the past (firing the timeout instantly). Give the leader
     // a fresh window instead.
@@ -612,6 +649,9 @@ export class GameEngine {
       showPendingVoters: this.showPendingVoters,
       readyCount: this.players.filter(p => p.ready).length,
       playerCount: this.players.length,
+      // Watch-only spectators (online only) for the lobby screen. No role or
+      // seat data — just enough to list who is watching.
+      spectators: this.spectators.filter(s => s.online).map(s => ({ id: s.id, name: s.name })),
     };
 
     if (this.phase === PHASES.GAMEOVER) {

@@ -486,6 +486,20 @@ function lobbyScreen(app, intents) {
     roster,
   ];
 
+  // Watch-only spectators (server-supplied, online-only) — listed separately so
+  // they're clearly not part of the player count / lineup.
+  const spectators = pub.spectators || [];
+  if (spectators.length) {
+    children.push(el('div', { class: 'section-label' }, `SPECTATORS · ${spectators.length}`));
+    children.push(el('ul', { class: 'roster' },
+      ...spectators.map(s => el('li', { class: 'roster-item' },
+        el('span', { class: 'dot on' }),
+        el('span', { class: 'roster-name' }, s.name),
+        el('span', { class: 'pill pill-sm' }, 'WATCHING'),
+      )),
+    ));
+  }
+
   if (isHost) {
     children.push(roleConfigEditor(app, intents));
     children.push(gameOptions(app, intents));
@@ -517,7 +531,8 @@ function lobbyScreen(app, intents) {
       el('button', { class: 'btn btn-secondary', onclick: intents.requestLeaveGame }, 'LEAVE')));
   }
 
-  return shell(...children, liveRegion(`${players.length} players in lobby`));
+  return shell(...children, liveRegion(
+    `${players.length} players in lobby` + (spectators.length ? `, ${spectators.length} watching` : '')));
 }
 
 function roleConfigEditor(app, intents) {
